@@ -1,0 +1,15 @@
+## Interface: 120001
+## Title: DoxyTracker
+## Author: Doxy
+## Version: 0.0.1
+## SavedVariables: DoxyTrackerDB
+
+main.lua
+config/toggles.lua
+data/source_catalog.lua
+services/content_availability.lua
+tracking/character_tracker.lua
+trackers/quests.lua
+trackers/instances.lua
+ui/tracker_frame_ej.lua
+ui/commands.lua
