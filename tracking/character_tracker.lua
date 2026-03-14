@@ -10,6 +10,18 @@ local fallbackTime = _G["time"]
 local C_DateAndTime = _G["C_DateAndTime"]
 local C_QuestLog = _G["C_QuestLog"]
 
+local function NormalizeLootText(text)
+    local value = tostring(text or "")
+    value = value:gsub("|c%x%x%x%x%x%x%x%x", "")
+    value = value:gsub("|r", "")
+    value = value:gsub("|Hitem:[^|]+|h%[([^%]]+)%]|h", "%1")
+    value = value:gsub("|Hcurrency:[^|]+|h%[([^%]]+)%]|h", "%1")
+    value = value:gsub("^%s+", "")
+    value = value:gsub("%s+$", "")
+    value = value:gsub("%s+", " ")
+    return value
+end
+
 local function CharacterKey()
     local name = UnitName("player") or "Unknown"
     local realm = GetRealmName() or "UnknownRealm"
@@ -33,14 +45,16 @@ function DT.CharacterTracker:Initialize(db)
             lastSeen = 0,
         },
         tracking = {
-            dailyQuests = {},
-            weeklyQuests = {},
-            weeklyKnowledge = {},
-            dungeonClears = {},
-            raidClears = {},
-            knownDungeons = {},   -- persists: every dungeon ever seen
-            knownRaids    = {},   -- persists: every raid ever seen
-            resetWindows = {
+            dailyQuests       = {},
+            weeklyQuests      = {},
+            weeklyKnowledge   = {},
+            dungeonClears     = {},
+            raidClears        = {},
+            mplusRuns         = {},
+            weeklyDungeonLoot = {},
+            knownDungeons     = {}, -- persists: every dungeon ever seen
+            knownRaids        = {}, -- persists: every raid ever seen
+            resetWindows      = {
                 dailyAt = 0,
                 weeklyAt = 0,
             },
@@ -66,8 +80,10 @@ function DT.CharacterTracker:RefreshResets(force)
     local windows = self.character.tracking.resetWindows
     local now = GetServerTime and GetServerTime() or fallbackTime()
 
-    local dailyRemaining = C_DateAndTime and C_DateAndTime.GetSecondsUntilDailyReset and C_DateAndTime.GetSecondsUntilDailyReset() or 0
-    local weeklyRemaining = C_DateAndTime and C_DateAndTime.GetSecondsUntilWeeklyReset and C_DateAndTime.GetSecondsUntilWeeklyReset() or 0
+    local dailyRemaining = C_DateAndTime and C_DateAndTime.GetSecondsUntilDailyReset and
+    C_DateAndTime.GetSecondsUntilDailyReset() or 0
+    local weeklyRemaining = C_DateAndTime and C_DateAndTime.GetSecondsUntilWeeklyReset and
+    C_DateAndTime.GetSecondsUntilWeeklyReset() or 0
 
     if force or now >= (windows.dailyAt or 0) then
         self.character.tracking.dailyQuests = {}
@@ -79,6 +95,8 @@ function DT.CharacterTracker:RefreshResets(force)
         self.character.tracking.weeklyKnowledge = {}
         self.character.tracking.dungeonClears = {}
         self.character.tracking.raidClears = {}
+        self.character.tracking.mplusRuns = {}
+        self.character.tracking.weeklyDungeonLoot = {}
         windows.weeklyAt = ResetAt(weeklyRemaining)
     end
 end
@@ -93,7 +111,8 @@ function DT.CharacterTracker:MarkQuestCompletion(bucket, questID, title)
 
     local now = GetServerTime and GetServerTime() or fallbackTime()
     store[questID] = {
-        title = title or (C_QuestLog and C_QuestLog.GetTitleForQuestID and C_QuestLog.GetTitleForQuestID(questID)) or ("Quest " .. tostring(questID)),
+        title = title or (C_QuestLog and C_QuestLog.GetTitleForQuestID and C_QuestLog.GetTitleForQuestID(questID)) or
+        ("Quest " .. tostring(questID)),
         completedAt = now,
     }
 end
@@ -128,4 +147,79 @@ end
 
 function DT.CharacterTracker:GetCharacterData()
     return self.character
+end
+
+function DT.CharacterTracker:AddMPlusRun(dungeonName, payload)
+    self:RefreshResets(false)
+    if not self.character or not self.character.tracking then
+        return nil
+    end
+
+    local canonicalName = dungeonName
+    if DT.SourceCatalog and DT.SourceCatalog.GetCanonicalDungeonName then
+        canonicalName = DT.SourceCatalog:GetCanonicalDungeonName(dungeonName)
+    end
+
+    local runsByDungeon = self.character.tracking.mplusRuns
+    runsByDungeon[canonicalName] = runsByDungeon[canonicalName] or {}
+
+    local run = payload or {}
+    run.name = canonicalName
+    run.completedAt = run.completedAt or (GetServerTime and GetServerTime() or fallbackTime())
+    run.loot = run.loot or {}
+
+    table.insert(runsByDungeon[canonicalName], run)
+    return run
+end
+
+function DT.CharacterTracker:AddDungeonLoot(dungeonName, lootText, meta)
+    local normalized = NormalizeLootText(lootText)
+    if normalized == "" then
+        return
+    end
+
+    self:RefreshResets(false)
+    if not self.character or not self.character.tracking then
+        return
+    end
+
+    local canonicalName = dungeonName
+    if DT.SourceCatalog and DT.SourceCatalog.GetCanonicalDungeonName then
+        canonicalName = DT.SourceCatalog:GetCanonicalDungeonName(dungeonName)
+    end
+
+    local bucket = self.character.tracking.weeklyDungeonLoot
+    bucket[canonicalName] = bucket[canonicalName] or {}
+    local existing = bucket[canonicalName]
+    if #existing > 0 then
+        local last = existing[#existing]
+        if type(last) == "table" and last.text == normalized then
+            return
+        end
+    end
+
+    bucket[canonicalName][#bucket[canonicalName] + 1] = {
+        text = normalized,
+        addedAt = GetServerTime and GetServerTime() or fallbackTime(),
+        source = meta,
+    }
+end
+
+function DT.CharacterTracker:AddLootToRun(run, lootText)
+    local normalized = NormalizeLootText(lootText)
+    if not run or type(run) ~= "table" or normalized == "" then
+        return
+    end
+
+    run.loot = run.loot or {}
+    if #run.loot > 0 and run.loot[#run.loot] == normalized then
+        return
+    end
+
+    run.loot[#run.loot + 1] = normalized
+
+    local name = run.name
+    if name then
+        self:AddDungeonLoot(name, lootText, "mplus")
+    end
 end

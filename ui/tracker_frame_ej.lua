@@ -5,6 +5,12 @@ DT.TrackerFrame = DT.TrackerFrame or {}
 local CreateFrame = _G["CreateFrame"]
 local UIParent = _G["UIParent"]
 local C_Timer = _G["C_Timer"]
+local date = _G["date"]
+local UIDropDownMenu_SetWidth = _G["UIDropDownMenu_SetWidth"]
+local UIDropDownMenu_SetText = _G["UIDropDownMenu_SetText"]
+local UIDropDownMenu_Initialize = _G["UIDropDownMenu_Initialize"]
+local UIDropDownMenu_CreateInfo = _G["UIDropDownMenu_CreateInfo"]
+local UIDropDownMenu_AddButton = _G["UIDropDownMenu_AddButton"]
 local function t_unpack(t)
     if table and table.unpack then
         return table.unpack(t)
@@ -27,6 +33,7 @@ end
 
 local TAB_ORDER = {
     { key = "dungeons", label = UIText("TAB_DUNGEONS", "Dungeons") },
+    { key = "mplus",    label = UIText("TAB_MPLUS", "Mythic+") },
     { key = "daily",    label = UIText("TAB_DAILY", "Daily Quests") },
     { key = "weekly",   label = UIText("TAB_WEEKLY", "Weekly Quests") },
     { key = "raids",    label = UIText("TAB_RAIDS", "Raids") },
@@ -53,6 +60,8 @@ local COLORS = {
 local state = {
     activeTab = "dungeons",
     selectedDungeon = nil,
+    dungeonExpansionFilter = "midnight",
+    mplusSelectedRunKey = nil,
     dungeonNames = {},
     dungeonsByName = {},
     dungeonDoneCount = 0,
@@ -70,7 +79,63 @@ local ui = {
 }
 
 local refreshPending = false
-local Rebuild, UpdateLeftList, UpdateDungeonCards
+local Rebuild, UpdateLeftList, UpdateDungeonCards, ScheduleRebuild
+
+local function GetExpansionFilterOptions()
+    local source = DT.SourceCatalog and DT.SourceCatalog.GetExpansionOptions and DT.SourceCatalog:GetExpansionOptions() or
+    {}
+    local out = {}
+    local seen = {}
+
+    local function push(key, label)
+        if not key or key == "" or seen[key] then
+            return
+        end
+        seen[key] = true
+        out[#out + 1] = {
+            key = key,
+            label = label or key,
+        }
+    end
+
+    for _, option in ipairs(source) do
+        if option.key == "midnight" then
+            push(option.key, option.label)
+        end
+    end
+
+    for _, option in ipairs(source) do
+        if option.key ~= "midnight" then
+            push(option.key, option.label)
+        end
+    end
+
+    push("all", "All Expansions")
+    return out
+end
+
+local function EnsureExpansionFilterValid()
+    local options = GetExpansionFilterOptions()
+    for _, option in ipairs(options) do
+        if option.key == state.dungeonExpansionFilter then
+            return
+        end
+    end
+
+    state.dungeonExpansionFilter = "midnight"
+    if #options > 0 then
+        local hasMidnight = false
+        for _, option in ipairs(options) do
+            if option.key == "midnight" then
+                hasMidnight = true
+                break
+            end
+        end
+        if not hasMidnight then
+            state.dungeonExpansionFilter = options[1].key
+        end
+    end
+end
 
 local function FrameCall(frame, method)
     if not frame then return nil end
@@ -153,6 +218,10 @@ local function DifficultySlot(difficultyID, difficultyName)
     return nil
 end
 
+local function IsDungeonDifficultySlot(slot)
+    return slot == "N" or slot == "H" or slot == "M"
+end
+
 local function DungeonCellText(row, slot)
     if slot == "MPLUS" and row.done.MPLUS and row.bestKey and row.bestKey > 0 then
         return string.format("|cff44ff44+%d|r", row.bestKey)
@@ -175,10 +244,16 @@ local function BuildDungeonModel(char)
     end
 
     local doneStore = char.tracking.dungeonClears or {}
-    local groups = { "dungeons_mplus_rotation", "dungeons_midnight_gear", "dungeons_midnight_bonus" }
+    local lootStore = char.tracking.weeklyDungeonLoot or {}
+    local allDungeons = DT.SourceCatalog and DT.SourceCatalog.GetAllDungeonEntries and
+    DT.SourceCatalog:GetAllDungeonEntries() or {}
 
     local function ensure(name)
-        local key = tostring(name or "Unknown")
+        local canonical = name
+        if DT.SourceCatalog and DT.SourceCatalog.GetCanonicalDungeonName then
+            canonical = DT.SourceCatalog:GetCanonicalDungeonName(name)
+        end
+        local key = tostring(canonical or "Unknown")
         local row = model.byName[key]
         if not row then
             row = {
@@ -186,34 +261,58 @@ local function BuildDungeonModel(char)
                 known = { LFG = false, N = false, H = false, M = false, MPLUS = false },
                 done = { LFG = false, N = false, H = false, M = false, MPLUS = false },
                 bestKey = 0,
+                lootCount = 0,
             }
             model.byName[key] = row
         end
         return row
     end
 
-    for _, groupKey in ipairs(groups) do
-        if DT:IsGroupEnabled(groupKey) and DT.SourceCatalog:IsGroupVisible(groupKey) then
-            local group = DT.SourceCatalog:GetGroup(groupKey)
-            local known = group and group.knownInstances or {}
-            for _, entry in pairs(known) do
-                local row = ensure(type(entry) == "table" and entry.name or "Unknown")
-                local slot = DifficultySlot(type(entry) == "table" and entry.difficultyID,
-                    type(entry) == "table" and entry.difficultyName)
-                if slot then row.known[slot] = true end
+    for _, dungeon in ipairs(allDungeons) do
+        local expansionMatch = (state.dungeonExpansionFilter == "all" or state.dungeonExpansionFilter == dungeon.expansionKey)
+        local isVisible = true
+        if DT.SourceCatalog and DT.SourceCatalog.IsDungeonVisible then
+            isVisible = DT.SourceCatalog:IsDungeonVisible(dungeon.name)
+        end
+
+        if expansionMatch and isVisible then
+            local row = ensure(dungeon.name)
+            row.lootCount = #(lootStore[row.name] or {})
+            for difficultyID in pairs(dungeon.difficulties or {}) do
+                local slot = DifficultySlot(difficultyID)
+                if slot and IsDungeonDifficultySlot(slot) then
+                    row.known[slot] = true
+                end
             end
         end
     end
 
     for _, entry in pairs(doneStore) do
-        local row = ensure(type(entry) == "table" and entry.name or "Unknown")
-        local slot = DifficultySlot(type(entry) == "table" and entry.difficultyID,
-            type(entry) == "table" and entry.difficultyName)
-        if slot then
-            row.done[slot] = true
-            row.known[slot] = true
-            if slot == "MPLUS" and type(entry.keyLevel) == "number" then
-                row.bestKey = math.max(row.bestKey, entry.keyLevel)
+        local dungeonName = (type(entry) == "table" and entry.name) or "Unknown"
+        if DT.SourceCatalog and DT.SourceCatalog.GetCanonicalDungeonName then
+            dungeonName = DT.SourceCatalog:GetCanonicalDungeonName(dungeonName)
+        end
+
+        local expansionKey = nil
+        if DT.SourceCatalog and DT.SourceCatalog.GetDungeonExpansionInfo then
+            expansionKey = DT.SourceCatalog:GetDungeonExpansionInfo(dungeonName)
+        end
+
+        local expansionMatch = (state.dungeonExpansionFilter == "all" or state.dungeonExpansionFilter == expansionKey)
+        local isVisible = true
+        if DT.SourceCatalog and DT.SourceCatalog.IsDungeonVisible then
+            isVisible = DT.SourceCatalog:IsDungeonVisible(dungeonName)
+        end
+
+        if expansionMatch and isVisible then
+            local row = model.byName[dungeonName]
+            if row then
+                local slot = DifficultySlot(type(entry) == "table" and entry.difficultyID,
+                    type(entry) == "table" and entry.difficultyName)
+                if slot and IsDungeonDifficultySlot(slot) then
+                    row.done[slot] = true
+                    row.known[slot] = true
+                end
             end
         end
     end
@@ -225,7 +324,7 @@ local function BuildDungeonModel(char)
 
     for _, name in ipairs(model.names) do
         local row = model.byName[name]
-        for _, slot in ipairs({ "LFG", "N", "H", "M", "MPLUS" }) do
+        for _, slot in ipairs({ "N", "H", "M" }) do
             if row.known[slot] then
                 model.totalCount = model.totalCount + 1
                 if row.done[slot] then
@@ -239,6 +338,7 @@ local function BuildDungeonModel(char)
 end
 
 local function EnsureDungeonModel(char)
+    EnsureExpansionFilterValid()
     if state.dungeonCacheDirty then
         local model = BuildDungeonModel(char)
         state.dungeonNames = model.names
@@ -250,6 +350,28 @@ local function EnsureDungeonModel(char)
         if not state.selectedDungeon or not state.dungeonsByName[state.selectedDungeon] then
             state.selectedDungeon = state.dungeonNames[1]
         end
+    end
+end
+
+local function GetExpansionFilterLabel()
+    local options = GetExpansionFilterOptions()
+    for _, option in ipairs(options) do
+        if option.key == state.dungeonExpansionFilter then
+            return option.label or option.key
+        end
+    end
+
+    return state.dungeonExpansionFilter
+end
+
+local function RefreshExpansionDropdown()
+    if not ui.leftFilter then
+        return
+    end
+
+    EnsureExpansionFilterValid()
+    if UIDropDownMenu_SetText then
+        UIDropDownMenu_SetText(ui.leftFilter, GetExpansionFilterLabel())
     end
 end
 
@@ -338,11 +460,9 @@ end
 local function UpdateDifficultyTable()
     local row = state.dungeonsByName[state.selectedDungeon]
     local slots = {
-        { key = "LFG",   label = "LFG" },
-        { key = "N",     label = "Normal" },
-        { key = "H",     label = "Heroic" },
-        { key = "M",     label = "Mythic" },
-        { key = "MPLUS", label = "Mythic+" },
+        { key = "N", label = "Normal" },
+        { key = "H", label = "Heroic" },
+        { key = "M", label = "Mythic" },
     }
 
     for i, slotInfo in ipairs(slots) do
@@ -361,12 +481,17 @@ end
 
 UpdateDungeonCards = function()
     local selected = state.selectedDungeon
+    RefreshExpansionDropdown()
+
     ui.summaryTitle:SetText("Dungeon Overview")
-    ui.summarySub:SetText(string.format("%d / %d checks complete", state.dungeonDoneCount, state.dungeonTotalCount))
+    ui.summarySub:SetText(string.format("%d / %d checks complete  •  Filter: %s", state.dungeonDoneCount,
+        state.dungeonTotalCount,
+        GetExpansionFilterLabel()))
 
     if selected then
+        local row = state.dungeonsByName[selected]
         ui.detailTitle:SetText(selected)
-        ui.detailSub:SetText("Difficulty Progress")
+        ui.detailSub:SetText(string.format("Difficulty Progress  •  Weekly Loot: %d", row and (row.lootCount or 0) or 0))
     else
         ui.detailTitle:SetText("No Dungeons Available")
         ui.detailSub:SetText("Enable a dungeon group to populate this list.")
@@ -453,6 +578,8 @@ local function RenderQuestCards(doneStore, knownStore, emptyText)
         card.title:SetText(emptyText or "No entries yet")
         card.sub:SetText("Complete activities to populate this panel.")
         card.status:SetText(ICON_NEUTRAL)
+        card:EnableMouse(false)
+        card:SetScript("OnMouseUp", nil)
         card:Show()
         ui.cardsChild:SetHeight(96)
         return
@@ -477,6 +604,9 @@ local function RenderQuestCards(doneStore, knownStore, emptyText)
             card.status:SetText(ICON_MISSING)
             card.sub:SetText("Missing")
         end
+
+        card:EnableMouse(false)
+        card:SetScript("OnMouseUp", nil)
 
         card:Show()
     end
@@ -510,6 +640,8 @@ local function RenderInfoCards(entries, emptyTitle, emptySub)
         card.title:SetText(emptyTitle or "No entries")
         card.sub:SetText(emptySub or "No information available.")
         card.status:SetText(ICON_NEUTRAL)
+        card:EnableMouse(false)
+        card:SetScript("OnMouseUp", nil)
         card:Show()
         ui.cardsChild:SetHeight(96)
         return
@@ -529,6 +661,8 @@ local function RenderInfoCards(entries, emptyTitle, emptySub)
         card.title:SetText(entry.title or "Entry")
         card.sub:SetText(entry.sub or "")
         card.status:SetText(entry.status or ICON_NEUTRAL)
+        card:EnableMouse(false)
+        card:SetScript("OnMouseUp", nil)
         card:Show()
     end
 
@@ -542,6 +676,143 @@ local function RenderInfoCards(entries, emptyTitle, emptySub)
     end
 
     ui.cardsChild:SetHeight(math.max(1, maxEntries * 64 + 34))
+end
+
+local function RenderToggleCards(entries, emptyTitle, emptySub)
+    HideAllCards()
+
+    entries = entries or {}
+    if #entries == 0 then
+        RenderInfoCards({}, emptyTitle, emptySub)
+        return
+    end
+
+    local maxEntries = math.min(#entries, MAX_CARD_POOL)
+    local y = -30
+    for i = 1, maxEntries do
+        local entry = entries[i]
+        local card = AcquireCard(i)
+        if not card then break end
+
+        card:ClearAllPoints()
+        card:SetPoint("TOPLEFT", ui.cardsChild, "TOPLEFT", 0, y)
+        card:SetPoint("TOPRIGHT", ui.cardsChild, "TOPRIGHT", -4, y)
+        y = y - 64
+
+        card.title:SetText(entry.title or "Entry")
+        card.sub:SetText(entry.sub or "")
+        card.status:SetText(entry.status or ICON_NEUTRAL)
+        card:EnableMouse(type(entry.onToggle) == "function")
+        card:SetScript("OnMouseUp", function()
+            if type(entry.onToggle) == "function" then
+                entry.onToggle()
+            end
+        end)
+        card:Show()
+    end
+
+    ui.cardsChild:SetHeight(math.max(1, maxEntries * 64 + 34))
+end
+
+local function CompareMPlusRuns(a, b)
+    local keyA = tonumber(a and a.keyLevel) or 0
+    local keyB = tonumber(b and b.keyLevel) or 0
+    if keyA ~= keyB then
+        return keyA > keyB
+    end
+
+    local timedA = (a and (a.timed == true or a.timed == 1)) and 1 or 0
+    local timedB = (b and (b.timed == true or b.timed == 1)) and 1 or 0
+    if timedA ~= timedB then
+        return timedA > timedB
+    end
+
+    local timeA = tonumber(a and a.completionTimeMS) or 2147483647
+    local timeB = tonumber(b and b.completionTimeMS) or 2147483647
+    if timeA ~= timeB then
+        return timeA < timeB
+    end
+
+    return (tonumber(a and a.completedAt) or 0) > (tonumber(b and b.completedAt) or 0)
+end
+
+local function BuildMPlusEntries(tracking)
+    local runsByDungeon = (tracking and tracking.mplusRuns) or {}
+    local targetNames = DT.SourceCatalog and DT.SourceCatalog.GetSeasonOneDungeonNames and
+    DT.SourceCatalog:GetSeasonOneDungeonNames() or {}
+    local entries = {}
+    local pool = {}
+
+    for _, dungeonName in ipairs(targetNames) do
+        local runs = runsByDungeon[dungeonName] or {}
+        table.sort(runs, CompareMPlusRuns)
+        if #runs > 0 then
+            pool[#pool + 1] = runs[1]
+        end
+    end
+
+    table.sort(pool, CompareMPlusRuns)
+
+    for i = 1, math.min(4, #pool) do
+        local run = pool[i]
+        local runKey = string.format("%s|%s|%s|%s", tostring(run.name or ""), tostring(run.keyLevel or 0),
+            tostring(run.completionTimeMS or 0), tostring(run.completedAt or 0))
+        local lootList = run.loot or {}
+        local lootSummary
+        if #lootList > 0 then
+            local preview = tostring(lootList[1] or "")
+            if #lootList > 1 then
+                lootSummary = string.format("Loot: %s (+%d)", preview, #lootList - 1)
+            else
+                lootSummary = string.format("Loot: %s", preview)
+            end
+        else
+            lootSummary = "Loot: none recorded"
+        end
+
+        local timerText = (run.timed == true or run.timed == 1) and "Timed" or "Untimed"
+        local mins = math.floor((tonumber(run.completionTimeMS) or 0) / 60000)
+        local secs = math.floor(((tonumber(run.completionTimeMS) or 0) % 60000) / 1000)
+        local stamp = tonumber(run.completedAt) or 0
+        local when = (date and stamp > 0) and date("%m/%d %H:%M", stamp) or "Unknown time"
+        local selected = (state.mplusSelectedRunKey == runKey)
+
+        entries[#entries + 1] = {
+            title = string.format("#%d  %s  •  +%d%s", i, tostring(run.name or "Unknown"), tonumber(run.keyLevel) or 0,
+                selected and "  [Selected]" or ""),
+            sub = string.format("%s  •  %d:%02d  •  %s  •  %s", timerText, mins, secs, when, lootSummary),
+            status = ICON_DONE,
+            onToggle = function()
+                if state.mplusSelectedRunKey == runKey then
+                    state.mplusSelectedRunKey = nil
+                else
+                    state.mplusSelectedRunKey = runKey
+                end
+                ScheduleRebuild(true)
+            end,
+        }
+
+        if selected then
+            local details
+            if #lootList == 0 then
+                details = "No personal loot lines captured for this run."
+            else
+                local lines = {}
+                for idx, loot in ipairs(lootList) do
+                    lines[#lines + 1] = string.format("%d) %s", idx, tostring(loot))
+                end
+                details = table.concat(lines, "\n")
+            end
+
+            entries[#entries + 1] = {
+                title = "Selected Run Details",
+                sub = details,
+                status = ICON_NEUTRAL,
+            }
+        end
+    end
+
+    return entries
 end
 
 local function BuildRaidEntries(tracking)
@@ -625,6 +896,38 @@ local function BuildSettingsEntries()
         status = ICON_NEUTRAL,
     }
 
+    local expansions = DT.SourceCatalog and DT.SourceCatalog.GetExpansionOptions and
+    DT.SourceCatalog:GetExpansionOptions() or {}
+    for _, expansion in ipairs(expansions) do
+        local hidden = DT.SourceCatalog:IsExpansionHidden(expansion.key)
+        entries[#entries + 1] = {
+            title = string.format("Expansion: %s", expansion.label),
+            sub = hidden and "Hidden in Dungeons tab (click to show)" or "Visible in Dungeons tab (click to hide)",
+            status = hidden and ICON_MISSING or ICON_DONE,
+            onToggle = function()
+                DT.SourceCatalog:SetExpansionHidden(expansion.key, not hidden)
+                state.dungeonCacheDirty = true
+                ScheduleRebuild(true)
+            end,
+        }
+    end
+
+    local seasonOneNames = DT.SourceCatalog and DT.SourceCatalog.GetSeasonOneDungeonNames and
+    DT.SourceCatalog:GetSeasonOneDungeonNames() or {}
+    for _, dungeonName in ipairs(seasonOneNames) do
+        local hidden = DT.SourceCatalog:IsDungeonHidden(dungeonName)
+        entries[#entries + 1] = {
+            title = string.format("Dungeon: %s", dungeonName),
+            sub = hidden and "Hidden in Dungeons tab (click to show)" or "Visible in Dungeons tab (click to hide)",
+            status = hidden and ICON_MISSING or ICON_DONE,
+            onToggle = function()
+                DT.SourceCatalog:SetDungeonHidden(dungeonName, not hidden)
+                state.dungeonCacheDirty = true
+                ScheduleRebuild(true)
+            end,
+        }
+    end
+
     return entries
 end
 
@@ -659,7 +962,7 @@ local function UpdateTabVisuals()
     end
 end
 
-local function ScheduleRebuild(immediate)
+ScheduleRebuild = function(immediate)
     if not ui.frame then return end
 
     if immediate then
@@ -714,7 +1017,11 @@ Rebuild = function()
     end
 
     local tracking = char and char.tracking or {}
-    if state.activeTab == "daily" then
+    if state.activeTab == "mplus" then
+        ui.cardsHeader:SetText(UIText("TAB_MPLUS", "Mythic+"))
+        RenderToggleCards(BuildMPlusEntries(tracking), "No Mythic+ runs recorded",
+            "Complete a tracked S1 key to populate top-4 runs.")
+    elseif state.activeTab == "daily" then
         ui.cardsHeader:SetText(UIText("TAB_DAILY", "Daily Quests"))
         RenderQuestCards(tracking.dailyQuests or {}, (DT.QuestTracker and DT.QuestTracker.knownDaily) or {},
             "No daily quests discovered")
@@ -743,7 +1050,7 @@ Rebuild = function()
             "Clear a tracked raid difficulty to populate this panel.")
     else
         ui.cardsHeader:SetText(UIText("TAB_SETTINGS", "Settings"))
-        RenderInfoCards(BuildSettingsEntries(), "No settings available",
+        RenderToggleCards(BuildSettingsEntries(), "No settings available",
             "Configuration data has not been initialized yet.")
     end
 end
@@ -894,6 +1201,37 @@ local function Build()
     leftTitle:SetText(UIText("LEFT_PANEL_TITLE", "Dungeons"))
     leftTitle:SetTextColor(1.0, 0.86, 0.25)
 
+    local leftFilter = CreateFrame("Frame", "DoxyTrackerExpansionDropdown", leftPanel, "UIDropDownMenuTemplate")
+    leftFilter:SetPoint("TOPRIGHT", leftPanel, "TOPRIGHT", 18, 0)
+    leftFilter:SetScale(0.86)
+    if UIDropDownMenu_SetWidth then
+        UIDropDownMenu_SetWidth(leftFilter, 150)
+    end
+
+    if UIDropDownMenu_Initialize and UIDropDownMenu_CreateInfo and UIDropDownMenu_AddButton then
+        UIDropDownMenu_Initialize(leftFilter, function(_, level)
+            if level ~= 1 then
+                return
+            end
+
+            for _, option in ipairs(GetExpansionFilterOptions()) do
+                local info = UIDropDownMenu_CreateInfo()
+                info.text = option.label
+                info.value = option.key
+                info.checked = (option.key == state.dungeonExpansionFilter)
+                info.func = function(btn)
+                    state.dungeonExpansionFilter = btn.value
+                    state.dungeonCacheDirty = true
+                    ScheduleRebuild(true)
+                end
+                UIDropDownMenu_AddButton(info, level)
+            end
+        end)
+    end
+
+    ui.leftFilter = leftFilter
+    RefreshExpansionDropdown()
+
     local leftScroll = CreateFrame("ScrollFrame", nil, leftPanel, "UIPanelScrollFrameTemplate")
     leftScroll:SetPoint("TOPLEFT", leftPanel, "TOPLEFT", 6, -30)
     leftScroll:SetPoint("BOTTOMRIGHT", leftPanel, "BOTTOMRIGHT", -26, 8)
@@ -944,7 +1282,7 @@ local function Build()
     ui.detailSub:SetJustifyH("LEFT")
 
     local rowTop = -70
-    for i, label in ipairs({ "LFG", "Normal", "Heroic", "Mythic", "Mythic+" }) do
+    for i, label in ipairs({ "Normal", "Heroic", "Mythic" }) do
         local line = CreateFrame("Frame", nil, detail)
         line:SetPoint("TOPLEFT", detail, "TOPLEFT", 12, rowTop - ((i - 1) * 26))
         line:SetPoint("TOPRIGHT", detail, "TOPRIGHT", -12, rowTop - ((i - 1) * 26))
@@ -1079,7 +1417,7 @@ function DT.TrackerFrame:Refresh()
 end
 
 function DT.TrackerFrame:OnEvent(event)
-    if event == "UPDATE_INSTANCE_INFO" or event == "ENCOUNTER_END" or event == "CHALLENGE_MODE_COMPLETED" then
+    if event == "UPDATE_INSTANCE_INFO" or event == "ENCOUNTER_END" or event == "CHALLENGE_MODE_COMPLETED" or event == "CHAT_MSG_LOOT" then
         state.dungeonCacheDirty = true
     end
 

@@ -8,6 +8,7 @@ DT.UI_TEXT = DT.UI_TEXT or {
     HEADER_SUBTITLE = "Midnight Progress",
 
     TAB_DUNGEONS = "Dungeons",
+    TAB_MPLUS = "Mythic+",
     TAB_DAILY = "Daily Quests",
     TAB_WEEKLY = "Weekly Quests",
     TAB_RAIDS = "Raids",
@@ -135,3 +136,4 @@ frame:RegisterEvent("QUEST_LOG_UPDATE")
 frame:RegisterEvent("UPDATE_INSTANCE_INFO")
 frame:RegisterEvent("ENCOUNTER_END")
 frame:RegisterEvent("CHALLENGE_MODE_COMPLETED")
+frame:RegisterEvent("CHAT_MSG_LOOT")

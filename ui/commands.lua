@@ -116,8 +116,11 @@ local function HandleSlash(msg)
     end
 
     if command == "scan" then
-        if DT.InstanceTracker and DT.InstanceTracker.RefreshSavedInstances then
-            DT.InstanceTracker:RefreshSavedInstances()
+        if DT.InstanceTracker and DT.InstanceTracker.RequestSavedInstancesUpdate then
+            DT.InstanceTracker:RequestSavedInstancesUpdate()
+            if DT.InstanceTracker.ScanSavedInstances then
+                DT.InstanceTracker:ScanSavedInstances()
+            end
             DT:Print("Instance scan requested.")
         end
         return
