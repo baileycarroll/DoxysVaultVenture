@@ -4,6 +4,7 @@ DT.TrackerFrame = DT.TrackerFrame or {}
 
 local CreateFrame = _G["CreateFrame"]
 local UIParent = _G["UIParent"]
+local C_Timer = _G["C_Timer"]
 local function t_unpack(t)
     if table and table.unpack then
         return table.unpack(t)
@@ -33,6 +34,8 @@ local TAB_ORDER = {
 }
 
 local LEFT_ROW_H = 28
+local LEFT_LIST_BUFFER = 2
+local MAX_CARD_POOL = 18
 
 local COLORS = {
     bg = { 0.03, 0.03, 0.04, 0.96 },
@@ -54,6 +57,7 @@ local state = {
     dungeonsByName = {},
     dungeonDoneCount = 0,
     dungeonTotalCount = 0,
+    dungeonCacheDirty = true,
 }
 
 local ui = {
@@ -62,7 +66,11 @@ local ui = {
     cards = {},
     difficultyRows = {},
     tabs = {},
+    leftScrollOffset = 0,
 }
+
+local refreshPending = false
+local Rebuild, UpdateLeftList, UpdateDungeonCards
 
 local function FrameCall(frame, method)
     if not frame then return nil end
@@ -71,6 +79,30 @@ local function FrameCall(frame, method)
         return fn(frame)
     end
     return nil
+end
+
+local function IsShown(frame)
+    return frame and FrameCall(frame, "IsShown") == true
+end
+
+local function ApplyLeftButtonStyle(btn, selected, hovered)
+    if selected then
+        btn:SetBackdropColor(0.23, 0.17, 0.08, 0.95)
+        btn:SetBackdropBorderColor(0.90, 0.72, 0.22, 0.95)
+        btn.text:SetTextColor(1.0, 0.92, 0.45)
+        return
+    end
+
+    if hovered then
+        btn:SetBackdropColor(0.14, 0.12, 0.10, 0.94)
+        btn:SetBackdropBorderColor(0.62, 0.52, 0.24, 0.90)
+        btn.text:SetTextColor(0.96, 0.90, 0.76)
+        return
+    end
+
+    btn:SetBackdropColor(0.10, 0.10, 0.12, 0.92)
+    btn:SetBackdropBorderColor(0.22, 0.22, 0.24, 0.80)
+    btn.text:SetTextColor(0.84, 0.88, 0.94)
 end
 
 local function MakePanel(parent)
@@ -130,14 +162,16 @@ local function DungeonCellText(row, slot)
     return ICON_NEUTRAL
 end
 
-local function CollectDungeons(char)
-    state.dungeonNames = {}
-    state.dungeonsByName = {}
-    state.dungeonDoneCount = 0
-    state.dungeonTotalCount = 0
+local function BuildDungeonModel(char)
+    local model = {
+        names = {},
+        byName = {},
+        doneCount = 0,
+        totalCount = 0,
+    }
 
     if not char or not char.tracking then
-        return
+        return model
     end
 
     local doneStore = char.tracking.dungeonClears or {}
@@ -145,7 +179,7 @@ local function CollectDungeons(char)
 
     local function ensure(name)
         local key = tostring(name or "Unknown")
-        local row = state.dungeonsByName[key]
+        local row = model.byName[key]
         if not row then
             row = {
                 name = key,
@@ -153,7 +187,7 @@ local function CollectDungeons(char)
                 done = { LFG = false, N = false, H = false, M = false, MPLUS = false },
                 bestKey = 0,
             }
-            state.dungeonsByName[key] = row
+            model.byName[key] = row
         end
         return row
     end
@@ -184,25 +218,38 @@ local function CollectDungeons(char)
         end
     end
 
-    for name, _ in pairs(state.dungeonsByName) do
-        table.insert(state.dungeonNames, name)
+    for name, _ in pairs(model.byName) do
+        table.insert(model.names, name)
     end
-    table.sort(state.dungeonNames)
+    table.sort(model.names)
 
-    for _, name in ipairs(state.dungeonNames) do
-        local row = state.dungeonsByName[name]
+    for _, name in ipairs(model.names) do
+        local row = model.byName[name]
         for _, slot in ipairs({ "LFG", "N", "H", "M", "MPLUS" }) do
             if row.known[slot] then
-                state.dungeonTotalCount = state.dungeonTotalCount + 1
+                model.totalCount = model.totalCount + 1
                 if row.done[slot] then
-                    state.dungeonDoneCount = state.dungeonDoneCount + 1
+                    model.doneCount = model.doneCount + 1
                 end
             end
         end
     end
 
-    if not state.selectedDungeon or not state.dungeonsByName[state.selectedDungeon] then
-        state.selectedDungeon = state.dungeonNames[1]
+    return model
+end
+
+local function EnsureDungeonModel(char)
+    if state.dungeonCacheDirty then
+        local model = BuildDungeonModel(char)
+        state.dungeonNames = model.names
+        state.dungeonsByName = model.byName
+        state.dungeonDoneCount = model.doneCount
+        state.dungeonTotalCount = model.totalCount
+        state.dungeonCacheDirty = false
+
+        if not state.selectedDungeon or not state.dungeonsByName[state.selectedDungeon] then
+            state.selectedDungeon = state.dungeonNames[1]
+        end
     end
 end
 
@@ -226,43 +273,66 @@ local function EnsureLeftButton(index)
 
     btn:SetScript("OnClick", function(self)
         state.selectedDungeon = self._dungeonName
-        DT.TrackerFrame:Refresh()
+        UpdateLeftList()
+        UpdateDungeonCards()
+    end)
+
+    btn:SetScript("OnEnter", function(self)
+        self._hovered = true
+        ApplyLeftButtonStyle(self, state.selectedDungeon == self._dungeonName, true)
+    end)
+
+    btn:SetScript("OnLeave", function(self)
+        self._hovered = false
+        ApplyLeftButtonStyle(self, state.selectedDungeon == self._dungeonName, false)
     end)
 
     ui.leftButtons[index] = btn
     return btn
 end
 
-local function UpdateLeftList()
-    for _, btn in ipairs(ui.leftButtons) do
-        btn:Hide()
-    end
+UpdateLeftList = function()
+    local total = #state.dungeonNames
+    local scrollH = FrameCall(ui.leftScroll, "GetHeight") or 0
+    local visibleRows = math.max(1, math.floor(scrollH / LEFT_ROW_H) + LEFT_LIST_BUFFER)
+    local startIndex = math.floor((ui.leftScrollOffset or 0) / LEFT_ROW_H) + 1
 
-    local y = -2
-    for i, dungeonName in ipairs(state.dungeonNames) do
+    for i = 1, visibleRows do
         local btn = EnsureLeftButton(i)
-        btn:ClearAllPoints()
-        btn:SetPoint("TOPLEFT", ui.leftListChild, "TOPLEFT", 0, y)
-        btn:SetPoint("TOPRIGHT", ui.leftListChild, "TOPRIGHT", 0, y)
-        y = y - LEFT_ROW_H
+        local dungeonIndex = startIndex + i - 1
+        local dungeonName = state.dungeonNames[dungeonIndex]
 
-        btn._dungeonName = dungeonName
-        btn.text:SetText(dungeonName)
+        if dungeonName then
+            local y = -2 - ((dungeonIndex - 1) * LEFT_ROW_H)
 
-        if state.selectedDungeon == dungeonName then
-            btn:SetBackdropColor(0.23, 0.17, 0.08, 0.95)
-            btn:SetBackdropBorderColor(0.90, 0.72, 0.22, 0.95)
-            btn.text:SetTextColor(1.0, 0.92, 0.45)
+            btn:ClearAllPoints()
+            btn:SetPoint("TOPLEFT", ui.leftListChild, "TOPLEFT", 0, y)
+            btn:SetPoint("TOPRIGHT", ui.leftListChild, "TOPRIGHT", 0, y)
+
+            btn._dungeonName = dungeonName
+            btn.text:SetText(dungeonName)
+
+            ApplyLeftButtonStyle(btn, state.selectedDungeon == dungeonName, btn._hovered)
+            btn:Show()
         else
-            btn:SetBackdropColor(0.10, 0.10, 0.12, 0.92)
-            btn:SetBackdropBorderColor(0.22, 0.22, 0.24, 0.80)
-            btn.text:SetTextColor(0.84, 0.88, 0.94)
+            btn:Hide()
         end
-
-        btn:Show()
     end
 
-    ui.leftListChild:SetHeight(math.max(1, #state.dungeonNames * LEFT_ROW_H + 4))
+    for i = visibleRows + 1, #ui.leftButtons do
+        local btn = ui.leftButtons[i]
+        if btn then
+            btn:Hide()
+        end
+    end
+
+    ui.leftListChild:SetHeight(math.max(1, total * LEFT_ROW_H + 4))
+end
+
+local function HideAllCards()
+    for _, card in ipairs(ui.cards) do
+        card:Hide()
+    end
 end
 
 local function UpdateDifficultyTable()
@@ -289,7 +359,7 @@ local function UpdateDifficultyTable()
     end
 end
 
-local function UpdateDungeonCards()
+UpdateDungeonCards = function()
     local selected = state.selectedDungeon
     ui.summaryTitle:SetText("Dungeon Overview")
     ui.summarySub:SetText(string.format("%d / %d checks complete", state.dungeonDoneCount, state.dungeonTotalCount))
@@ -306,6 +376,10 @@ local function UpdateDungeonCards()
 end
 
 local function AcquireCard(index)
+    if index > MAX_CARD_POOL then
+        return nil
+    end
+
     local card = ui.cards[index]
     if card then return card end
 
@@ -333,9 +407,7 @@ local function AcquireCard(index)
 end
 
 local function RenderQuestCards(doneStore, knownStore, emptyText)
-    for _, card in ipairs(ui.cards) do
-        card:Hide()
-    end
+    HideAllCards()
 
     doneStore = doneStore or {}
     knownStore = knownStore or {}
@@ -371,6 +443,10 @@ local function RenderQuestCards(doneStore, knownStore, emptyText)
 
     if #entries == 0 then
         local card = AcquireCard(1)
+        if not card then
+            ui.cardsChild:SetHeight(96)
+            return
+        end
         card:ClearAllPoints()
         card:SetPoint("TOPLEFT", ui.cardsChild, "TOPLEFT", 0, -30)
         card:SetPoint("TOPRIGHT", ui.cardsChild, "TOPRIGHT", -4, -30)
@@ -382,9 +458,12 @@ local function RenderQuestCards(doneStore, knownStore, emptyText)
         return
     end
 
+    local maxEntries = math.min(#entries, MAX_CARD_POOL)
     local y = -30
-    for i, entry in ipairs(entries) do
+    for i = 1, maxEntries do
+        local entry = entries[i]
         local card = AcquireCard(i)
+        if not card then break end
         card:ClearAllPoints()
         card:SetPoint("TOPLEFT", ui.cardsChild, "TOPLEFT", 0, y)
         card:SetPoint("TOPRIGHT", ui.cardsChild, "TOPRIGHT", -4, y)
@@ -402,18 +481,29 @@ local function RenderQuestCards(doneStore, knownStore, emptyText)
         card:Show()
     end
 
-    ui.cardsChild:SetHeight(math.max(1, #entries * 64 + 34))
+    if #entries > MAX_CARD_POOL then
+        local card = AcquireCard(MAX_CARD_POOL)
+        if card then
+            card.title:SetText(string.format("And %d more...", #entries - (MAX_CARD_POOL - 1)))
+            card.sub:SetText("Refine filters or expand UI in a future update.")
+            card.status:SetText(ICON_NEUTRAL)
+        end
+    end
+
+    ui.cardsChild:SetHeight(math.max(1, maxEntries * 64 + 34))
 end
 
 local function RenderInfoCards(entries, emptyTitle, emptySub)
-    for _, card in ipairs(ui.cards) do
-        card:Hide()
-    end
+    HideAllCards()
 
     entries = entries or {}
 
     if #entries == 0 then
         local card = AcquireCard(1)
+        if not card then
+            ui.cardsChild:SetHeight(96)
+            return
+        end
         card:ClearAllPoints()
         card:SetPoint("TOPLEFT", ui.cardsChild, "TOPLEFT", 0, -30)
         card:SetPoint("TOPRIGHT", ui.cardsChild, "TOPRIGHT", -4, -30)
@@ -425,9 +515,12 @@ local function RenderInfoCards(entries, emptyTitle, emptySub)
         return
     end
 
+    local maxEntries = math.min(#entries, MAX_CARD_POOL)
     local y = -30
-    for i, entry in ipairs(entries) do
+    for i = 1, maxEntries do
+        local entry = entries[i]
         local card = AcquireCard(i)
+        if not card then break end
         card:ClearAllPoints()
         card:SetPoint("TOPLEFT", ui.cardsChild, "TOPLEFT", 0, y)
         card:SetPoint("TOPRIGHT", ui.cardsChild, "TOPRIGHT", -4, y)
@@ -439,7 +532,16 @@ local function RenderInfoCards(entries, emptyTitle, emptySub)
         card:Show()
     end
 
-    ui.cardsChild:SetHeight(math.max(1, #entries * 64 + 34))
+    if #entries > MAX_CARD_POOL then
+        local card = AcquireCard(MAX_CARD_POOL)
+        if card then
+            card.title:SetText(string.format("And %d more...", #entries - (MAX_CARD_POOL - 1)))
+            card.sub:SetText("Refine filters or expand UI in a future update.")
+            card.status:SetText(ICON_NEUTRAL)
+        end
+    end
+
+    ui.cardsChild:SetHeight(math.max(1, maxEntries * 64 + 34))
 end
 
 local function BuildRaidEntries(tracking)
@@ -544,14 +646,49 @@ local function UpdateTabVisuals()
             tab:SetBackdropBorderColor(t_unpack(COLORS.activeTabEdge))
             tab.text:SetTextColor(1.0, 0.92, 0.35)
         else
-            tab:SetBackdropColor(t_unpack(COLORS.inactiveTab))
-            tab:SetBackdropBorderColor(t_unpack(COLORS.inactiveTabEdge))
-            tab.text:SetTextColor(0.80, 0.84, 0.92)
+            if tab._hovered then
+                tab:SetBackdropColor(0.12, 0.11, 0.09, 0.95)
+                tab:SetBackdropBorderColor(0.56, 0.50, 0.26, 0.88)
+                tab.text:SetTextColor(0.95, 0.90, 0.72)
+            else
+                tab:SetBackdropColor(t_unpack(COLORS.inactiveTab))
+                tab:SetBackdropBorderColor(t_unpack(COLORS.inactiveTabEdge))
+                tab.text:SetTextColor(0.80, 0.84, 0.92)
+            end
         end
     end
 end
 
-local function Rebuild()
+local function ScheduleRebuild(immediate)
+    if not ui.frame then return end
+
+    if immediate then
+        refreshPending = false
+        Rebuild()
+        return
+    end
+
+    if refreshPending then
+        return
+    end
+
+    refreshPending = true
+
+    local function doRefresh()
+        refreshPending = false
+        if IsShown(ui.frame) then
+            Rebuild()
+        end
+    end
+
+    if C_Timer and C_Timer.After then
+        C_Timer.After(0.03, doRefresh)
+    else
+        doRefresh()
+    end
+end
+
+Rebuild = function()
     if not ui.frame then return end
 
     local char = DT.CharacterTracker and DT.CharacterTracker:GetCharacterData()
@@ -570,7 +707,7 @@ local function Rebuild()
     ui.cardsScroll:SetShown(not isDungeon)
 
     if isDungeon then
-        CollectDungeons(char)
+        EnsureDungeonModel(char)
         UpdateLeftList()
         UpdateDungeonCards()
         return
@@ -650,6 +787,15 @@ local function Layout()
     local listWidth = (FrameCall(ui.leftScroll, "GetWidth") or (leftW - 26)) - 2
     ui.leftListChild:SetWidth(math.max(120, listWidth))
 
+    local maxScroll = math.max(0,
+        (FrameCall(ui.leftListChild, "GetHeight") or 0) - (FrameCall(ui.leftScroll, "GetHeight") or 0))
+    if ui.leftScrollOffset > maxScroll then
+        ui.leftScrollOffset = maxScroll
+        if ui.leftScroll and ui.leftScroll.SetVerticalScroll then
+            ui.leftScroll:SetVerticalScroll(ui.leftScrollOffset)
+        end
+    end
+
     if ui.rightPanel and ui.detailCard then
         ui.detailCard:SetHeight(math.max(180, math.floor((h - 170) * 0.56)))
     end
@@ -691,6 +837,33 @@ local function Build()
         frame.Inset.Bg:SetVertexColor(t_unpack(COLORS.inset))
     end
 
+    local topStrip = frame:CreateTexture(nil, "BACKGROUND")
+    topStrip:SetPoint("TOPLEFT", frame, "TOPLEFT", 6, -24)
+    topStrip:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -6, -24)
+    topStrip:SetHeight(30)
+    topStrip:SetTexture("Interface\\Buttons\\WHITE8x8")
+    topStrip:SetVertexColor(0.12, 0.09, 0.05, 0.80)
+
+    local sepTop = frame:CreateTexture(nil, "BORDER")
+    sepTop:SetPoint("TOPLEFT", frame, "TOPLEFT", 10, -54)
+    sepTop:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -10, -54)
+    sepTop:SetHeight(1)
+    sepTop:SetTexture("Interface\\Buttons\\WHITE8x8")
+    sepTop:SetVertexColor(0.66, 0.52, 0.20, 0.45)
+
+    local sepBottom = frame:CreateTexture(nil, "BORDER")
+    sepBottom:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 10, 40)
+    sepBottom:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -10, 40)
+    sepBottom:SetHeight(1)
+    sepBottom:SetTexture("Interface\\Buttons\\WHITE8x8")
+    sepBottom:SetVertexColor(0.66, 0.52, 0.20, 0.35)
+
+    local vignette = frame:CreateTexture(nil, "ARTWORK")
+    vignette:SetPoint("TOPLEFT", frame, "TOPLEFT", 6, -24)
+    vignette:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -6, 6)
+    vignette:SetTexture("Interface\\Buttons\\WHITE8x8")
+    vignette:SetVertexColor(0.03, 0.03, 0.03, 0.25)
+
     local header = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     header:SetPoint("TOPLEFT", frame, "TOPLEFT", 20, -32)
     header:SetText(UIText("HEADER_TITLE", "Doxy Tracker"))
@@ -709,7 +882,9 @@ local function Build()
     refresh:SetSize(84, 22)
     refresh:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -30, -30)
     refresh:SetText(UIText("BUTTON_REFRESH", "Refresh"))
-    refresh:SetScript("OnClick", Rebuild)
+    refresh:SetScript("OnClick", function()
+        ScheduleRebuild(true)
+    end)
 
     local leftPanel = MakePanel(frame)
     ui.leftPanel = leftPanel
@@ -723,6 +898,11 @@ local function Build()
     leftScroll:SetPoint("TOPLEFT", leftPanel, "TOPLEFT", 6, -30)
     leftScroll:SetPoint("BOTTOMRIGHT", leftPanel, "BOTTOMRIGHT", -26, 8)
     ui.leftScroll = leftScroll
+    leftScroll:SetScript("OnVerticalScroll", function(self, offset)
+        ui.leftScrollOffset = offset
+        self:SetVerticalScroll(offset)
+        UpdateLeftList()
+    end)
 
     local leftChild = CreateFrame("Frame", nil, leftScroll)
     leftChild:SetSize(1, 1)
@@ -824,7 +1004,17 @@ local function Build()
 
         tab:SetScript("OnClick", function(self)
             state.activeTab = self._key
-            Rebuild()
+            ScheduleRebuild(true)
+        end)
+
+        tab:SetScript("OnEnter", function(self)
+            self._hovered = true
+            UpdateTabVisuals()
+        end)
+
+        tab:SetScript("OnLeave", function(self)
+            self._hovered = false
+            UpdateTabVisuals()
         end)
 
         ui.tabs[i] = tab
@@ -845,7 +1035,7 @@ local function Build()
     resizeGrip:SetScript("OnMouseUp", function()
         frame:StopMovingOrSizing()
         Layout()
-        Rebuild()
+        ScheduleRebuild()
     end)
 
     frame:SetScript("OnSizeChanged", function()
@@ -854,7 +1044,7 @@ local function Build()
 
     frame:SetScript("OnShow", function()
         Layout()
-        Rebuild()
+        ScheduleRebuild(true)
     end)
 end
 
@@ -864,17 +1054,17 @@ end
 
 function DT.TrackerFrame:Toggle()
     if not ui.frame then Build() end
-    if FrameCall(ui.frame, "IsShown") then
+    if IsShown(ui.frame) then
         FrameCall(ui.frame, "Hide")
     else
-        Rebuild()
+        ScheduleRebuild(true)
         FrameCall(ui.frame, "Show")
     end
 end
 
 function DT.TrackerFrame:Show()
     if not ui.frame then Build() end
-    Rebuild()
+    ScheduleRebuild(true)
     FrameCall(ui.frame, "Show")
 end
 
@@ -883,8 +1073,22 @@ function DT.TrackerFrame:Hide()
 end
 
 function DT.TrackerFrame:Refresh()
-    if ui.frame and FrameCall(ui.frame, "IsShown") then
-        Rebuild()
+    if IsShown(ui.frame) then
+        ScheduleRebuild()
+    end
+end
+
+function DT.TrackerFrame:OnEvent(event)
+    if event == "UPDATE_INSTANCE_INFO" or event == "ENCOUNTER_END" or event == "CHALLENGE_MODE_COMPLETED" then
+        state.dungeonCacheDirty = true
+    end
+
+    if event == "PLAYER_ENTERING_WORLD" then
+        state.dungeonCacheDirty = true
+    end
+
+    if IsShown(ui.frame) then
+        ScheduleRebuild()
     end
 end
 
