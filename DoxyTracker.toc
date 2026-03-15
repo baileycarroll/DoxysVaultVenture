@@ -1,5 +1,5 @@
 ## Interface: 120001
-## Title: DoxyTracker
+## Title: Doxy's Vault & Venture
 ## Author: Doxy
 ## Version: 0.0.1
 ## SavedVariables: DoxyTrackerDB

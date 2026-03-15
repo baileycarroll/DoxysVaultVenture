@@ -3,9 +3,9 @@ local ADDON_NAME, DT = ...
 DT.name = ADDON_NAME
 DT.modules = DT.modules or {}
 DT.UI_TEXT = DT.UI_TEXT or {
-    WINDOW_TITLE = "DoxyTracker",
-    HEADER_TITLE = "Doxy Tracker",
-    HEADER_SUBTITLE = "Midnight Progress",
+    WINDOW_TITLE = "Doxy's Vault & Venture",
+    HEADER_TITLE = "Vault & Venture",
+    HEADER_SUBTITLE = "Daily & Weekly Progress",
 
     TAB_DUNGEONS = "Dungeons",
     TAB_MPLUS = "Mythic+",

@@ -63,6 +63,14 @@ local COLORS = {
     inactiveTabEdge = { 0.20, 0.20, 0.22, 0.8 },
 }
 
+local SETTINGS_ABOUT = {
+    name = "DoxyTracker",
+    author = "Doxy",
+    version = "0.0.1",
+    lastUpdated = "2026-03-14",
+    notes = "Tracks dungeon and raid progress, boss kills, and loot with per-difficulty summaries.",
+}
+
 local state = {
     activeTab = "dungeons",
     selectedDungeon = nil,
@@ -88,6 +96,7 @@ local ui = {
     cards = {},
     difficultyRows = {},
     detailLootRows = {},
+    settingsChecks = {},
     tabs = {},
     leftScrollOffset = 0,
     exportContext = nil,
@@ -130,7 +139,8 @@ local function GetExpansionFilterOptions()
 end
 
 local function GetRaidFilterOptions()
-    return (DT.SourceCatalog and DT.SourceCatalog.GetRaidExpansionOptions and DT.SourceCatalog:GetRaidExpansionOptions()) or {
+    return (DT.SourceCatalog and DT.SourceCatalog.GetRaidExpansionOptions and DT.SourceCatalog:GetRaidExpansionOptions()) or
+    {
         { key = "all", label = "All Expansions" },
     }
 end
@@ -467,16 +477,17 @@ local function BuildRaidModel(char)
 
     for _, entry in pairs(clears) do
         if type(entry) == "table" and entry.name then
-            local expansionKey = (DT.SourceCatalog and DT.SourceCatalog.GetRaidExpansionInfo and select(1, DT.SourceCatalog:GetRaidExpansionInfo(entry.name))) or nil
+            local expansionKey = (DT.SourceCatalog and DT.SourceCatalog.GetRaidExpansionInfo and select(1, DT.SourceCatalog:GetRaidExpansionInfo(entry.name))) or
+            nil
             if includeExpansion(expansionKey) then
-            local slot = RaidDifficultySlot(entry.difficultyID, entry.difficultyName)
-            if slot then
-                local row = ensure(entry.name)
-                row.known[slot] = true
-                row.done[slot] = true
-                row.encountersDone = math.max(row.encountersDone, tonumber(entry.encounterProgress) or 0)
-                row.encountersTotal = math.max(row.encountersTotal, tonumber(entry.numEncounters) or 0)
-            end
+                local slot = RaidDifficultySlot(entry.difficultyID, entry.difficultyName)
+                if slot then
+                    local row = ensure(entry.name)
+                    row.known[slot] = true
+                    row.done[slot] = true
+                    row.encountersDone = math.max(row.encountersDone, tonumber(entry.encounterProgress) or 0)
+                    row.encountersTotal = math.max(row.encountersTotal, tonumber(entry.numEncounters) or 0)
+                end
             end
         end
     end
@@ -489,7 +500,8 @@ local function BuildRaidModel(char)
 
     for key, kills in pairs(bossStore) do
         local raidName, diff = splitRaidKey(key)
-        local expansionKey = (DT.SourceCatalog and DT.SourceCatalog.GetRaidExpansionInfo and raidName and select(1, DT.SourceCatalog:GetRaidExpansionInfo(raidName))) or nil
+        local expansionKey = (DT.SourceCatalog and DT.SourceCatalog.GetRaidExpansionInfo and raidName and select(1, DT.SourceCatalog:GetRaidExpansionInfo(raidName))) or
+        nil
         if raidName and type(kills) == "table" and includeExpansion(expansionKey) then
             local row = ensure(raidName)
             row.bossKills = row.bossKills + #kills
@@ -499,7 +511,8 @@ local function BuildRaidModel(char)
     for key, loot in pairs(lootStore) do
         local raidName, diff = splitRaidKey(key)
         local slot = RaidDifficultySlot(diff)
-        local expansionKey = (DT.SourceCatalog and DT.SourceCatalog.GetRaidExpansionInfo and raidName and select(1, DT.SourceCatalog:GetRaidExpansionInfo(raidName))) or nil
+        local expansionKey = (DT.SourceCatalog and DT.SourceCatalog.GetRaidExpansionInfo and raidName and select(1, DT.SourceCatalog:GetRaidExpansionInfo(raidName))) or
+        nil
         if raidName and slot and type(loot) == "table" and includeExpansion(expansionKey) then
             local row = ensure(raidName)
             local bucket = row.lootBySlot[slot]
@@ -777,7 +790,28 @@ local function SlotLabel(slot)
     if slot == "N" then return "Normal" end
     if slot == "H" then return "Heroic" end
     if slot == "M" then return "Mythic" end
+    if slot == "MPLUS" then return "Mythic+" end
     return tostring(slot or "?")
+end
+
+local function DungeonLootSlot(difficultyID, difficultyName, source)
+    if source == "mplus" then
+        return "MPLUS"
+    end
+
+    local id = tonumber(difficultyID) or 0
+    if id == 23 then return "M" end
+    if id == 2 then return "H" end
+    if id == 1 then return "N" end
+    if id == 8 then return "MPLUS" end
+
+    local name = string.lower(tostring(difficultyName or ""))
+    if string.find(name, "keystone") or string.find(name, "mythic%+") then return "MPLUS" end
+    if string.find(name, "mythic") then return "M" end
+    if string.find(name, "heroic") then return "H" end
+    if string.find(name, "normal") then return "N" end
+
+    return "N"
 end
 
 local function BuildRaidLootDetailsText(row)
@@ -881,6 +915,69 @@ local function BuildSelectedRaidLootEntries(raidName, tracking)
                         out[#out + 1] = entry
                     end
                 end
+            end
+        end
+    end
+
+    table.sort(out, function(a, b)
+        local ta = tonumber(a.addedAt) or 0
+        local tb = tonumber(b.addedAt) or 0
+        if ta ~= tb then
+            return ta > tb
+        end
+        if a.slot ~= b.slot then
+            return tostring(a.slot) < tostring(b.slot)
+        end
+        return tostring(a.text) < tostring(b.text)
+    end)
+
+    return out
+end
+
+local function BuildSelectedDungeonLootEntries(dungeonName, tracking)
+    local out = {}
+    local aggregated = {}
+    if not dungeonName or dungeonName == "" then
+        return out
+    end
+
+    local list = ((tracking and tracking.weeklyDungeonLoot) or {})[dungeonName] or {}
+    for _, row in ipairs(list) do
+        local text = (type(row) == "table" and tostring(row.text or "")) or tostring(row or "")
+        if text ~= "" then
+            local itemName = type(row) == "table" and row.itemName or nil
+            local itemLink = type(row) == "table" and row.itemLink or nil
+            local quantity = type(row) == "table" and tonumber(row.quantity) or 1
+            local stamp = (type(row) == "table" and tonumber(row.addedAt)) or 0
+            local source = type(row) == "table" and row.source or nil
+            local diffID = type(row) == "table" and row.difficultyID or nil
+            local diffName = type(row) == "table" and row.difficultyName or nil
+            local slot = DungeonLootSlot(diffID, diffName, source)
+
+            local key
+            if (itemLink and itemLink ~= "") or (itemName and itemName ~= "") then
+                key = string.format("%s|%s", tostring(slot), tostring(itemLink or itemName))
+            else
+                key = string.format("%s|%s|%s", tostring(slot), tostring(text), tostring(stamp))
+            end
+
+            local existing = aggregated[key]
+            if existing then
+                existing.quantity = (tonumber(existing.quantity) or 0) + (quantity or 1)
+                if stamp > (tonumber(existing.addedAt) or 0) then
+                    existing.addedAt = stamp
+                end
+            else
+                local entry = {
+                    slot = slot,
+                    text = text,
+                    itemName = itemName,
+                    itemLink = itemLink,
+                    quantity = quantity or 1,
+                    addedAt = stamp,
+                }
+                aggregated[key] = entry
+                out[#out + 1] = entry
             end
         end
     end
@@ -1044,15 +1141,31 @@ UpdateDungeonCards = function()
 
     if selected then
         local row = state.dungeonsByName[selected]
+        local char = DT.CharacterTracker and DT.CharacterTracker:GetCharacterData()
+        local tracking = char and char.tracking or {}
+        local lootEntries = BuildSelectedDungeonLootEntries(selected, tracking)
         ui.detailTitle:SetText(selected)
         ui.detailSub:SetText(string.format("Difficulty Progress  •  Weekly Loot: %d", row and (row.lootCount or 0) or 0))
+        if ui.detailLootTitle then
+            ui.detailLootTitle:SetText("Loot Log (all events, grouped by difficulty)")
+            ui.detailLootTitle:Show()
+        end
+        if ui.detailLootScroll then
+            ui.detailLootScroll:Show()
+        end
+        RenderDetailLootTable(lootEntries)
     else
         ui.detailTitle:SetText("No Dungeons Available")
         ui.detailSub:SetText("Enable a dungeon group to populate this list.")
+        if ui.detailLootTitle then
+            ui.detailLootTitle:SetText("Loot Log")
+            ui.detailLootTitle:Show()
+        end
+        if ui.detailLootScroll then
+            ui.detailLootScroll:Show()
+        end
+        RenderDetailLootTable({})
     end
-
-    if ui.detailLootTitle then ui.detailLootTitle:Hide() end
-    if ui.detailLootScroll then ui.detailLootScroll:Hide() end
 
     UpdateDifficultyTable()
 end
@@ -1146,7 +1259,8 @@ local function SetQuestPin(questID, mapID)
         questMapID = DT.SourceCatalog:GetQuestMapID(questID)
     end
 
-    local inLog = C_QuestLog and C_QuestLog.GetLogIndexForQuestID and (C_QuestLog.GetLogIndexForQuestID(questID) or 0) > 0
+    local inLog = C_QuestLog and C_QuestLog.GetLogIndexForQuestID and
+    (C_QuestLog.GetLogIndexForQuestID(questID) or 0) > 0
 
     if inLog and C_SuperTrack and C_SuperTrack.SetSuperTrackedQuestID then
         C_SuperTrack.SetSuperTrackedQuestID(questID)
@@ -1396,7 +1510,8 @@ local function BuildQuestExportText(tabKey, doneStore, knownStore)
         local completed = doneStore[id] ~= nil
 
         lines[#lines + 1] = string.format("    %s = {", keyText)
-        lines[#lines + 1] = string.format("        id = %s,", idNum and tostring(idNum) or ("\"" .. EscapeLuaString(id) .. "\""))
+        lines[#lines + 1] = string.format("        id = %s,",
+            idNum and tostring(idNum) or ("\"" .. EscapeLuaString(id) .. "\""))
         lines[#lines + 1] = string.format("        title = \"%s\",", EscapeLuaString(questTitle))
         if zone and zone ~= "" then
             lines[#lines + 1] = string.format("        zone = \"%s\",", EscapeLuaString(zone))
@@ -1953,92 +2068,95 @@ local function BuildRaidEntries(tracking)
     return entries
 end
 
-local function BuildSettingsEntries()
-    local entries = {}
-    local settings = (DT.db and DT.db.settings) or {}
-    local toggles = settings.groupToggles or {}
-
-    local keys = {}
-    for k in pairs(toggles) do
-        keys[#keys + 1] = k
-    end
-    table.sort(keys)
-
-    for _, key in ipairs(keys) do
-        local enabled = toggles[key] == true
-        local label = key
-        if DT.SourceCatalog and DT.SourceCatalog.GetGroup then
-            local group = DT.SourceCatalog:GetGroup(key)
-            if group and group.label then
-                label = group.label
-            end
-        end
-
-        entries[#entries + 1] = {
-            title = label,
-            sub = string.format("%s (%s)", enabled and "Enabled" or "Disabled", key),
-            status = enabled and ICON_DONE or ICON_MISSING,
-        }
-    end
-
-    entries[#entries + 1] = {
-        title = "Tip",
-        sub = "Use /doxy toggle <group_key> to change source toggles.",
-        status = ICON_NEUTRAL,
+local function BuildSettingsCheckboxItems()
+    return {
+        {
+            key = "clearLootOnInstanceReset",
+            label = "Clear loot on instance reset",
+            note = "If enabled, reset-instance clears loot logs only for runs with no boss kills.",
+        },
     }
+end
 
-    local clearOnReset = settings.clearLootOnInstanceReset == true
-    entries[#entries + 1] = {
-        title = "Loot: Clear on instance reset",
-        sub = clearOnReset and "Enabled (loot logs are wiped when instances are reset)" or
-            "Disabled (loot logs persist after instance reset)",
-        status = clearOnReset and ICON_DONE or ICON_MISSING,
-        onToggle = function()
-            settings.clearLootOnInstanceReset = not clearOnReset
-            if DT.Print then
-                if settings.clearLootOnInstanceReset then
-                    DT:Print("Loot will now clear when you reset instances.")
-                else
-                    DT:Print("Loot will now persist when you reset instances.")
-                end
+local function EnsureSettingsCheckbox(index)
+    local row = ui.settingsChecks[index]
+    if row then
+        return row
+    end
+
+    row = CreateFrame("Frame", nil, ui.settingsPanel)
+    row:SetHeight(38)
+
+    row.check = CreateFrame("CheckButton", nil, row, "UICheckButtonTemplate")
+    row.check:SetPoint("TOPLEFT", row, "TOPLEFT", 0, 0)
+
+    row.label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    row.label:SetPoint("LEFT", row.check, "RIGHT", 4, 0)
+    row.label:SetPoint("RIGHT", row, "RIGHT", -8, 0)
+    row.label:SetJustifyH("LEFT")
+
+    row.note = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    row.note:SetPoint("TOPLEFT", row.label, "BOTTOMLEFT", 0, -2)
+    row.note:SetPoint("RIGHT", row, "RIGHT", -8, 0)
+    row.note:SetJustifyH("LEFT")
+
+    ui.settingsChecks[index] = row
+    return row
+end
+
+local function RenderSettingsView()
+    if not ui.settingsPanel then
+        return
+    end
+
+    local settings = (DT.db and DT.db.settings) or {}
+    local addonName = tostring((DT and DT.name) or SETTINGS_ABOUT.name)
+    local version = (_G["GetAddOnMetadata"] and _G["GetAddOnMetadata"](addonName, "Version")) or SETTINGS_ABOUT.version
+    local author = (_G["GetAddOnMetadata"] and _G["GetAddOnMetadata"](addonName, "Author")) or SETTINGS_ABOUT.author
+
+    if ui.settingsAboutRow then
+        ui.settingsAboutRow:SetText(string.format(
+            "Add On: %s    |    Author: %s    |    Version: %s    |    Last Updated: %s",
+            addonName,
+            tostring(author or SETTINGS_ABOUT.author),
+            tostring(version or SETTINGS_ABOUT.version),
+            tostring(SETTINGS_ABOUT.lastUpdated)))
+    end
+
+    if ui.settingsNotesText then
+        local notes = UIText("SETTINGS_NOTES", SETTINGS_ABOUT.notes)
+        ui.settingsNotesText:SetText(tostring(notes or ""))
+    end
+
+    local items = BuildSettingsCheckboxItems()
+    local topY = -176
+    for i, item in ipairs(items) do
+        local row = EnsureSettingsCheckbox(i)
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT", ui.settingsPanel, "TOPLEFT", 14, topY - ((i - 1) * 42))
+        row:SetPoint("TOPRIGHT", ui.settingsPanel, "TOPRIGHT", -14, topY - ((i - 1) * 42))
+
+        row.label:SetText(item.label)
+        row.note:SetText(item.note or "")
+        row.check:SetChecked(settings[item.key] == true)
+        row.check:SetScript("OnClick", function(self)
+            settings[item.key] = self:GetChecked() and true or false
+            if item.key == "allowPossibleSources" or item.key == "hidePossibleSources" then
+                state.dungeonCacheDirty = true
+                state.raidCacheDirty = true
             end
             ScheduleRebuild(true)
-        end,
-    }
+        end)
 
-    local expansions = DT.SourceCatalog and DT.SourceCatalog.GetExpansionOptions and
-        DT.SourceCatalog:GetExpansionOptions() or {}
-    for _, expansion in ipairs(expansions) do
-        local hidden = DT.SourceCatalog:IsExpansionHidden(expansion.key)
-        entries[#entries + 1] = {
-            title = string.format("Expansion: %s", expansion.label),
-            sub = hidden and "Hidden in Dungeons tab (click to show)" or "Visible in Dungeons tab (click to hide)",
-            status = hidden and ICON_MISSING or ICON_DONE,
-            onToggle = function()
-                DT.SourceCatalog:SetExpansionHidden(expansion.key, not hidden)
-                state.dungeonCacheDirty = true
-                ScheduleRebuild(true)
-            end,
-        }
+        row:Show()
     end
 
-    local seasonOneNames = DT.SourceCatalog and DT.SourceCatalog.GetSeasonOneDungeonNames and
-        DT.SourceCatalog:GetSeasonOneDungeonNames() or {}
-    for _, dungeonName in ipairs(seasonOneNames) do
-        local hidden = DT.SourceCatalog:IsDungeonHidden(dungeonName)
-        entries[#entries + 1] = {
-            title = string.format("Dungeon: %s", dungeonName),
-            sub = hidden and "Hidden in Dungeons tab (click to show)" or "Visible in Dungeons tab (click to hide)",
-            status = hidden and ICON_MISSING or ICON_DONE,
-            onToggle = function()
-                DT.SourceCatalog:SetDungeonHidden(dungeonName, not hidden)
-                state.dungeonCacheDirty = true
-                ScheduleRebuild(true)
-            end,
-        }
+    for i = #items + 1, #ui.settingsChecks do
+        local row = ui.settingsChecks[i]
+        if row then
+            row:Hide()
+        end
     end
-
-    return entries
 end
 
 local function GetWeeklyKnowledgeKnown()
@@ -2108,7 +2226,8 @@ Rebuild = function()
     local subtitle = UIText("HEADER_SUBTITLE", "Midnight Progress")
     local zoneText = GetCurrentZoneLabel()
     if char and char.meta then
-        ui.headerSub:SetText(string.format("%s  •  %s - %s  •  %s", subtitle, char.meta.name or "?", char.meta.realm or "?", zoneText))
+        ui.headerSub:SetText(string.format("%s  •  %s - %s  •  %s", subtitle, char.meta.name or "?",
+            char.meta.realm or "?", zoneText))
     else
         ui.headerSub:SetText(string.format("%s  •  %s", subtitle, zoneText))
     end
@@ -2116,9 +2235,13 @@ Rebuild = function()
     UpdateTabVisuals()
 
     local isInstanceTab = (state.activeTab == "dungeons" or state.activeTab == "raids")
+    local isSettingsTab = state.activeTab == "settings"
     ui.leftPanel:SetShown(isInstanceTab)
     ui.rightPanel:SetShown(isInstanceTab)
-    ui.cardsScroll:SetShown(not isInstanceTab)
+    ui.cardsScroll:SetShown((not isInstanceTab) and (not isSettingsTab))
+    if ui.settingsPanel then
+        ui.settingsPanel:SetShown(isSettingsTab)
+    end
 
     if state.activeTab == "dungeons" then
         SetQuestExportContext(nil)
@@ -2182,9 +2305,7 @@ Rebuild = function()
         RenderQuestCards(mergedDone, mergedKnown, "No weekly quests discovered")
     else
         SetQuestExportContext(nil)
-        ui.cardsHeader:SetText(UIText("TAB_SETTINGS", "Settings"))
-        RenderToggleCards(BuildSettingsEntries(), "No settings available",
-            "Configuration data has not been initialized yet.")
+        RenderSettingsView()
     end
 end
 
@@ -2223,6 +2344,12 @@ local function Layout()
     ui.cardsScroll:ClearAllPoints()
     ui.cardsScroll:SetPoint("TOPLEFT", ui.frame, "TOPLEFT", 10, topY)
     ui.cardsScroll:SetPoint("BOTTOMRIGHT", ui.frame, "BOTTOMRIGHT", -28, bottomY)
+
+    if ui.settingsPanel then
+        ui.settingsPanel:ClearAllPoints()
+        ui.settingsPanel:SetPoint("TOPLEFT", ui.frame, "TOPLEFT", 10, topY)
+        ui.settingsPanel:SetPoint("BOTTOMRIGHT", ui.frame, "BOTTOMRIGHT", -12, bottomY)
+    end
 
     local cardsWidth = (FrameCall(ui.cardsScroll, "GetWidth") or (w - 46)) - 24
     if ui.cardsChild then
@@ -2359,7 +2486,8 @@ local function Build()
             end
 
             local options = (state.activeTab == "raids") and GetRaidFilterOptions() or GetExpansionFilterOptions()
-            local selectedValue = (state.activeTab == "raids") and state.raidExpansionFilter or state.dungeonExpansionFilter
+            local selectedValue = (state.activeTab == "raids") and state.raidExpansionFilter or
+            state.dungeonExpansionFilter
             for _, option in ipairs(options) do
                 local info = UIDropDownMenu_CreateInfo()
                 info.text = option.label
@@ -2474,6 +2602,45 @@ local function Build()
     lootChild:SetSize(1, 1)
     lootScroll:SetScrollChild(lootChild)
     ui.detailLootChild = lootChild
+
+    local settingsPanel = MakePanel(frame)
+    settingsPanel:Hide()
+    ui.settingsPanel = settingsPanel
+
+    local settingsTitle = settingsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    settingsTitle:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", 12, -10)
+    settingsTitle:SetPoint("TOPRIGHT", settingsPanel, "TOPRIGHT", -12, -10)
+    settingsTitle:SetJustifyH("LEFT")
+    settingsTitle:SetText("About")
+
+    local aboutRow = settingsPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    aboutRow:SetPoint("TOPLEFT", settingsTitle, "BOTTOMLEFT", 0, -8)
+    aboutRow:SetPoint("TOPRIGHT", settingsPanel, "TOPRIGHT", -12, -8)
+    aboutRow:SetJustifyH("LEFT")
+    aboutRow:SetWordWrap(false)
+    aboutRow:SetText("")
+    ui.settingsAboutRow = aboutRow
+
+    local notesHeader = settingsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    notesHeader:SetPoint("TOPLEFT", aboutRow, "BOTTOMLEFT", 0, -14)
+    notesHeader:SetPoint("TOPRIGHT", settingsPanel, "TOPRIGHT", -12, -14)
+    notesHeader:SetJustifyH("LEFT")
+    notesHeader:SetText("Description / Notes")
+
+    local notesText = settingsPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    notesText:SetPoint("TOPLEFT", notesHeader, "BOTTOMLEFT", 0, -6)
+    notesText:SetPoint("TOPRIGHT", settingsPanel, "TOPRIGHT", -12, -6)
+    notesText:SetJustifyH("LEFT")
+    notesText:SetJustifyV("TOP")
+    notesText:SetWordWrap(true)
+    notesText:SetText("")
+    ui.settingsNotesText = notesText
+
+    local settingsHeader = settingsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    settingsHeader:SetPoint("TOPLEFT", settingsPanel, "TOPLEFT", 12, -150)
+    settingsHeader:SetPoint("TOPRIGHT", settingsPanel, "TOPRIGHT", -12, -150)
+    settingsHeader:SetJustifyH("LEFT")
+    settingsHeader:SetText("Settings")
 
     local cardsScroll = CreateFrame("ScrollFrame", nil, frame, "UIPanelScrollFrameTemplate")
     ui.cardsScroll = cardsScroll

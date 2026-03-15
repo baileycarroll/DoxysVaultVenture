@@ -9,9 +9,9 @@ local EnumTable          = _G["Enum"]
 local UnitName           = _G["UnitName"]
 local GetRealZoneText    = _G["GetRealZoneText"]
 local DAILY_FREQUENCY    = _G["LE_QUEST_FREQUENCY_DAILY"] or
-(EnumTable and EnumTable.QuestFrequency and EnumTable.QuestFrequency.Daily)
+    (EnumTable and EnumTable.QuestFrequency and EnumTable.QuestFrequency.Daily)
 local WEEKLY_FREQUENCY   = _G["LE_QUEST_FREQUENCY_WEEKLY"] or
-(EnumTable and EnumTable.QuestFrequency and EnumTable.QuestFrequency.Weekly)
+    (EnumTable and EnumTable.QuestFrequency and EnumTable.QuestFrequency.Weekly)
 
 QuestTracker.knownDaily  = {}
 QuestTracker.knownWeekly = {}
@@ -51,8 +51,9 @@ end
 
 function QuestTracker:ScanQuestLog()
     self.knownDaily  = (DT.SourceCatalog and DT.SourceCatalog.GetKnownDailyQuestMap and DT.SourceCatalog:GetKnownDailyQuestMap()) or
+        {}
+    self.knownWeekly = (DT.SourceCatalog and DT.SourceCatalog.GetKnownWeeklyQuestMap and DT.SourceCatalog:GetKnownWeeklyQuestMap()) or
     {}
-    self.knownWeekly = (DT.SourceCatalog and DT.SourceCatalog.GetKnownWeeklyQuestMap and DT.SourceCatalog:GetKnownWeeklyQuestMap()) or {}
 
     if not C_QuestLog or not C_QuestLog.GetNumQuestLogEntries or not C_QuestLog.GetInfo then
         return
@@ -63,7 +64,8 @@ function QuestTracker:ScanQuestLog()
         local info = C_QuestLog.GetInfo(i)
         if info and not info.isHeader and info.questID and info.questID > 0 then
             if info.frequency == DAILY_FREQUENCY or (DT.SourceCatalog and DT.SourceCatalog.IsKnownDailyQuest and DT.SourceCatalog:IsKnownDailyQuest(info.questID)) then
-                local zone = DT.SourceCatalog and DT.SourceCatalog.GetQuestZoneText and DT.SourceCatalog:GetQuestZoneText(info.questID)
+                local zone = DT.SourceCatalog and DT.SourceCatalog.GetQuestZoneText and
+                DT.SourceCatalog:GetQuestZoneText(info.questID)
                 local mapID = info.questMapID or info.mapID or
                     (DT.SourceCatalog and DT.SourceCatalog.GetQuestMapID and DT.SourceCatalog:GetQuestMapID(info.questID))
                 local wpMapID, wpX, wpY = QuestWaypointSnapshot(info.questID)
@@ -93,11 +95,13 @@ function QuestTracker:ScanQuestLog()
                         y = wpY or pY,
                     })
                     if isNew and DT.Print then
-                        DT:Print(string.format("Discovered daily quest: %s (%d)", info.title or ("Quest " .. info.questID), info.questID))
+                        DT:Print(string.format("Discovered daily quest: %s (%d)",
+                            info.title or ("Quest " .. info.questID), info.questID))
                     end
                 end
             elseif info.frequency == WEEKLY_FREQUENCY then
-                local zone = DT.SourceCatalog and DT.SourceCatalog.GetQuestZoneText and DT.SourceCatalog:GetQuestZoneText(info.questID)
+                local zone = DT.SourceCatalog and DT.SourceCatalog.GetQuestZoneText and
+                DT.SourceCatalog:GetQuestZoneText(info.questID)
                 local mapID = info.questMapID or info.mapID or
                     (DT.SourceCatalog and DT.SourceCatalog.GetQuestMapID and DT.SourceCatalog:GetQuestMapID(info.questID))
                 local wpMapID, wpX, wpY = QuestWaypointSnapshot(info.questID)
@@ -128,7 +132,8 @@ function QuestTracker:ScanQuestLog()
                         y = wpY or pY,
                     })
                     if isNew and DT.Print then
-                        DT:Print(string.format("Discovered weekly quest: %s (%d)", info.title or ("Quest " .. info.questID), info.questID))
+                        DT:Print(string.format("Discovered weekly quest: %s (%d)",
+                            info.title or ("Quest " .. info.questID), info.questID))
                     end
                 end
             end

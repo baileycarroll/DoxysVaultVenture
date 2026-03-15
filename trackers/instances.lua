@@ -233,7 +233,8 @@ local function IsTrackedRaid(instanceType)
         return false
     end
 
-    return DT.SourceCatalog and DT.SourceCatalog.IsGroupTrackable and DT.SourceCatalog:IsGroupTrackable("raids_midnight_s1")
+    return DT.SourceCatalog and DT.SourceCatalog.IsGroupTrackable and
+    DT.SourceCatalog:IsGroupTrackable("raids_midnight_s1")
 end
 
 function InstanceTracker:RefreshRaidSession()
@@ -321,7 +322,7 @@ function InstanceTracker:ScanSavedInstances()
     local count = GetNumSavedInstances() or 0
     for i = 1, count do
         local name, lockoutID, reset, difficultyID, locked, extended, _, isRaid, maxPlayers, difficultyName, numEncounters, encounterProgress =
-        GetSavedInstanceInfo(i)
+            GetSavedInstanceInfo(i)
 
         if (not difficultyName or difficultyName == "") and GetDifficultyInfo and difficultyID then
             difficultyName = GetDifficultyInfo(difficultyID)
@@ -420,10 +421,12 @@ function InstanceTracker:OnEvent(event, ...)
         local encounterID, encounterName, difficultyID, _, success = ...
         if success == 1 and difficultyID then
             self:RecordCurrentInstanceClear()
-            local name, instanceType = GetInstanceInfo()
+            local name, instanceType, currentDiffID, currentDiffName = GetInstanceInfo()
             if instanceType == "party" and name then
                 BeginLootCapture(self, {
-                    name = CanonicalDungeonName(name)
+                    name = CanonicalDungeonName(name),
+                    difficultyID = currentDiffID,
+                    difficultyName = currentDiffName,
                 })
             elseif instanceType == "raid" then
                 self:RefreshRaidSession()
@@ -490,11 +493,14 @@ function InstanceTracker:OnEvent(event, ...)
         local shouldClearLoot = DT and DT.db and DT.db.settings and DT.db.settings.clearLootOnInstanceReset == true
         if shouldClearLoot and IsInstanceResetSystemMessage(text)
             and DT.CharacterTracker
-            and DT.CharacterTracker.ClearRecordedLoot
+            and DT.CharacterTracker.ClearResettableLootOnInstanceReset
         then
-            DT.CharacterTracker:ClearRecordedLoot()
+            local dCleared, rCleared = DT.CharacterTracker:ClearResettableLootOnInstanceReset()
             if DT.Print then
-                DT:Print("Recorded loot cleared due to instance reset.")
+                DT:Print(string.format(
+                    "Instance reset: cleared loot for %d dungeon(s) and %d raid(s) with no boss kills.",
+                    tonumber(dCleared) or 0,
+                    tonumber(rCleared) or 0))
             end
             if DT.TrackerFrame and DT.TrackerFrame.Refresh then
                 DT.TrackerFrame:Refresh()

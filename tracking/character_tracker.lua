@@ -70,18 +70,18 @@ function DT.CharacterTracker:Initialize(db)
             lastSeen = 0,
         },
         tracking = {
-            dailyQuests       = {},
-            weeklyQuests      = {},
-            weeklyKnowledge   = {},
-            dungeonClears     = {},
-            raidClears        = {},
+            dailyQuests         = {},
+            weeklyQuests        = {},
+            weeklyKnowledge     = {},
+            dungeonClears       = {},
+            raidClears          = {},
             weeklyRaidBossKills = {},
-            weeklyRaidLoot    = {},
-            mplusRuns         = {},
-            weeklyDungeonLoot = {},
-            knownDungeons     = {}, -- persists: every dungeon ever seen
-            knownRaids        = {}, -- persists: every raid ever seen
-            resetWindows      = {
+            weeklyRaidLoot      = {},
+            mplusRuns           = {},
+            weeklyDungeonLoot   = {},
+            knownDungeons       = {}, -- persists: every dungeon ever seen
+            knownRaids          = {}, -- persists: every raid ever seen
+            resetWindows        = {
                 dailyAt = 0,
                 weeklyAt = 0,
             },
@@ -108,9 +108,9 @@ function DT.CharacterTracker:RefreshResets(force)
     local now = GetServerTime and GetServerTime() or fallbackTime()
 
     local dailyRemaining = C_DateAndTime and C_DateAndTime.GetSecondsUntilDailyReset and
-    C_DateAndTime.GetSecondsUntilDailyReset() or 0
+        C_DateAndTime.GetSecondsUntilDailyReset() or 0
     local weeklyRemaining = C_DateAndTime and C_DateAndTime.GetSecondsUntilWeeklyReset and
-    C_DateAndTime.GetSecondsUntilWeeklyReset() or 0
+        C_DateAndTime.GetSecondsUntilWeeklyReset() or 0
 
     if force or now >= (windows.dailyAt or 0) then
         self.character.tracking.dailyQuests = {}
@@ -264,7 +264,7 @@ function DT.CharacterTracker:MarkQuestCompletion(bucket, questID, title)
     local now = GetServerTime and GetServerTime() or fallbackTime()
     store[questID] = {
         title = title or (C_QuestLog and C_QuestLog.GetTitleForQuestID and C_QuestLog.GetTitleForQuestID(questID)) or
-        ("Quest " .. tostring(questID)),
+            ("Quest " .. tostring(questID)),
         completedAt = now,
     }
 end
@@ -330,6 +330,8 @@ function DT.CharacterTracker:AddDungeonLoot(dungeonName, lootText, meta)
         return
     end
 
+    local lootMeta = ExtractLootMeta(lootText, normalized)
+
     self:RefreshResets(false)
     if not self.character or not self.character.tracking then
         return
@@ -350,10 +352,24 @@ function DT.CharacterTracker:AddDungeonLoot(dungeonName, lootText, meta)
         end
     end
 
+    local source = meta
+    local difficultyID, difficultyName
+    if type(meta) == "table" then
+        source = meta.source
+        difficultyID = tonumber(meta.difficultyID)
+        difficultyName = meta.difficultyName
+    end
+
     bucket[canonicalName][#bucket[canonicalName] + 1] = {
         text = normalized,
+        rawText = lootMeta.rawText,
+        itemName = lootMeta.itemName,
+        itemLink = lootMeta.itemLink,
+        quantity = lootMeta.quantity,
+        difficultyID = difficultyID,
+        difficultyName = difficultyName,
         addedAt = GetServerTime and GetServerTime() or fallbackTime(),
-        source = meta,
+        source = source,
     }
 end
 
@@ -372,7 +388,12 @@ function DT.CharacterTracker:AddLootToRun(run, lootText)
 
     local name = run.name
     if name then
-        self:AddDungeonLoot(name, lootText, "mplus")
+        self:AddDungeonLoot(name, lootText, {
+            source = (tonumber(run.keyLevel) or 0) > 0 and "mplus" or "dungeon",
+            difficultyID = run.difficultyID,
+            difficultyName = run.difficultyName,
+            keyLevel = run.keyLevel,
+        })
     end
 end
 
@@ -395,4 +416,67 @@ function DT.CharacterTracker:ClearRecordedLoot()
             end
         end
     end
+end
+
+function DT.CharacterTracker:ClearResettableLootOnInstanceReset()
+    self:RefreshResets(false)
+    if not self.character or not self.character.tracking then
+        return 0, 0
+    end
+
+    local tracking = self.character.tracking
+    local dungeonClears = tracking.dungeonClears or {}
+    local raidClears = tracking.raidClears or {}
+    local raidBossKills = tracking.weeklyRaidBossKills or {}
+
+    local clearedDungeonBuckets = 0
+    local clearedRaidBuckets = 0
+
+    local function splitInstanceKey(key)
+        local text = tostring(key or "")
+        local name, diff = text:match("^(.*):(%-?%d+)$")
+        return name, tonumber(diff)
+    end
+
+    local hasDungeonBossClearByName = {}
+    for sig, _ in pairs(dungeonClears) do
+        local name = splitInstanceKey(sig)
+        if name and name ~= "" then
+            hasDungeonBossClearByName[name] = true
+        end
+    end
+
+    for dungeonName, lootList in pairs(tracking.weeklyDungeonLoot or {}) do
+        if type(lootList) == "table" and #lootList > 0 then
+            if not hasDungeonBossClearByName[dungeonName] then
+                tracking.weeklyDungeonLoot[dungeonName] = nil
+                clearedDungeonBuckets = clearedDungeonBuckets + 1
+            end
+        end
+    end
+
+    for raidSig, lootList in pairs(tracking.weeklyRaidLoot or {}) do
+        if type(lootList) == "table" and #lootList > 0 then
+            local hasBoss = false
+
+            local kills = raidBossKills[raidSig]
+            if type(kills) == "table" and #kills > 0 then
+                hasBoss = true
+            end
+
+            if not hasBoss then
+                local clear = raidClears[raidSig]
+                if type(clear) == "table" and (tonumber(clear.encounterProgress) or 0) > 0 then
+                    hasBoss = true
+                end
+            end
+
+            if not hasBoss then
+                tracking.weeklyRaidLoot[raidSig] = nil
+                clearedRaidBuckets = clearedRaidBuckets + 1
+            end
+        end
+    end
+
+    return clearedDungeonBuckets, clearedRaidBuckets
 end
