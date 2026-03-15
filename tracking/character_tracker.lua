@@ -22,6 +22,31 @@ local function NormalizeLootText(text)
     return value
 end
 
+local function ExtractLootMeta(rawText, normalizedText)
+    local raw = tostring(rawText or "")
+    local normalized = tostring(normalizedText or "")
+
+    local itemString = raw:match("|H(item:[^|]+)|h")
+    local itemName = raw:match("|h%[([^%]]+)%]|h") or normalized:match("%[([^%]]+)%]")
+    local quantity = tonumber(raw:match("[xX](%d+)%f[^%d]"))
+        or tonumber(normalized:match("[xX](%d+)%f[^%d]"))
+        or tonumber(raw:match("(%d+)%s*[xX]%f[^%a]"))
+        or tonumber(normalized:match("(%d+)%s*[xX]%f[^%a]"))
+        or 1
+
+    local itemLink
+    if itemString and itemName then
+        itemLink = string.format("|H%s|h[%s]|h", itemString, itemName)
+    end
+
+    return {
+        itemName = itemName,
+        itemLink = itemLink,
+        quantity = quantity,
+        rawText = raw,
+    }
+end
+
 local function CharacterKey()
     local name = UnitName("player") or "Unknown"
     local realm = GetRealmName() or "UnknownRealm"
@@ -50,6 +75,8 @@ function DT.CharacterTracker:Initialize(db)
             weeklyKnowledge   = {},
             dungeonClears     = {},
             raidClears        = {},
+            weeklyRaidBossKills = {},
+            weeklyRaidLoot    = {},
             mplusRuns         = {},
             weeklyDungeonLoot = {},
             knownDungeons     = {}, -- persists: every dungeon ever seen
@@ -63,7 +90,7 @@ function DT.CharacterTracker:Initialize(db)
 
     self.character = db.characters[self.charKey]
     self:Touch()
-    self:RefreshResets(true)
+    self:RefreshResets(false)
 end
 
 function DT.CharacterTracker:Touch()
@@ -95,10 +122,135 @@ function DT.CharacterTracker:RefreshResets(force)
         self.character.tracking.weeklyKnowledge = {}
         self.character.tracking.dungeonClears = {}
         self.character.tracking.raidClears = {}
+        self.character.tracking.weeklyRaidBossKills = {}
+        self.character.tracking.weeklyRaidLoot = {}
         self.character.tracking.mplusRuns = {}
         self.character.tracking.weeklyDungeonLoot = {}
         windows.weeklyAt = ResetAt(weeklyRemaining)
     end
+end
+
+local function RaidSessionKey(sessionOrName, difficultyID)
+    if type(sessionOrName) == "table" then
+        local name = tostring(sessionOrName.name or "Unknown Raid")
+        local diff = tonumber(sessionOrName.difficultyID) or 0
+        return string.format("%s:%d", name, diff)
+    end
+
+    return string.format("%s:%d", tostring(sessionOrName or "Unknown Raid"), tonumber(difficultyID) or 0)
+end
+
+function DT.CharacterTracker:AddRaidBossKill(session, payload)
+    self:RefreshResets(false)
+    if not self.character or not self.character.tracking or type(session) ~= "table" then
+        return
+    end
+
+    local bucket = self.character.tracking.weeklyRaidBossKills
+    if not bucket then
+        return
+    end
+
+    local key = RaidSessionKey(session)
+    local list = bucket[key] or {}
+    bucket[key] = list
+
+    payload = payload or {}
+    local bossID = tonumber(payload.encounterID) or 0
+    local bossName = tostring(payload.encounterName or "Unknown Boss")
+    local now = GetServerTime and GetServerTime() or fallbackTime()
+
+    for _, row in ipairs(list) do
+        if type(row) == "table" and tonumber(row.encounterID) == bossID and bossID > 0 then
+            row.killedAt = row.killedAt or now
+            row.encounterName = row.encounterName or bossName
+            return
+        end
+    end
+
+    list[#list + 1] = {
+        encounterID = bossID,
+        encounterName = bossName,
+        killedAt = now,
+        difficultyID = tonumber(session.difficultyID) or 0,
+        difficultyName = session.difficultyName,
+        mapID = tonumber(session.mapID) or nil,
+    }
+end
+
+function DT.CharacterTracker:AddRaidLoot(session, lootText, source)
+    local normalized = NormalizeLootText(lootText)
+    if normalized == "" then
+        return
+    end
+
+    local meta = ExtractLootMeta(lootText, normalized)
+
+    self:RefreshResets(false)
+    if not self.character or not self.character.tracking or type(session) ~= "table" then
+        return
+    end
+
+    local bucket = self.character.tracking.weeklyRaidLoot
+    if not bucket then
+        return
+    end
+
+    local key = RaidSessionKey(session)
+    local list = bucket[key] or {}
+    bucket[key] = list
+
+    if #list > 0 and type(list[#list]) == "table" and list[#list].text == normalized then
+        return
+    end
+
+    list[#list + 1] = {
+        text = normalized,
+        rawText = meta.rawText,
+        itemName = meta.itemName,
+        itemLink = meta.itemLink,
+        quantity = meta.quantity,
+        addedAt = GetServerTime and GetServerTime() or fallbackTime(),
+        source = source or "raid",
+    }
+end
+
+function DT.CharacterTracker:RemoveRaidLootByText(session, lootText)
+    local normalized = NormalizeLootText(lootText)
+    if normalized == "" then
+        return false
+    end
+
+    self:RefreshResets(false)
+    if not self.character or not self.character.tracking or type(session) ~= "table" then
+        return false
+    end
+
+    local bucket = self.character.tracking.weeklyRaidLoot
+    if not bucket then
+        return false
+    end
+
+    local key = RaidSessionKey(session)
+    local list = bucket[key]
+    if type(list) ~= "table" or #list == 0 then
+        return false
+    end
+
+    for i = #list, 1, -1 do
+        local row = list[i]
+        if type(row) == "table" and type(row.text) == "string" then
+            if row.text == normalized
+                or string.find(string.lower(row.text), string.lower(normalized), 1, true)
+                or string.find(string.lower(normalized), string.lower(row.text), 1, true)
+            then
+                table.remove(list, i)
+                return true
+            end
+        end
+    end
+
+    return false
 end
 
 function DT.CharacterTracker:MarkQuestCompletion(bucket, questID, title)
@@ -221,5 +373,26 @@ function DT.CharacterTracker:AddLootToRun(run, lootText)
     local name = run.name
     if name then
         self:AddDungeonLoot(name, lootText, "mplus")
+    end
+end
+
+function DT.CharacterTracker:ClearRecordedLoot()
+    self:RefreshResets(false)
+    if not self.character or not self.character.tracking then
+        return
+    end
+
+    self.character.tracking.weeklyDungeonLoot = {}
+    self.character.tracking.weeklyRaidLoot = {}
+
+    local runsByDungeon = self.character.tracking.mplusRuns or {}
+    for _, runs in pairs(runsByDungeon) do
+        if type(runs) == "table" then
+            for _, run in ipairs(runs) do
+                if type(run) == "table" then
+                    run.loot = {}
+                end
+            end
+        end
     end
 end

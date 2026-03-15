@@ -11,6 +11,11 @@ local GetDifficultyInfo = _G["GetDifficultyInfo"]
 local GetServerTime = _G["GetServerTime"]
 local fallbackTime = _G["time"]
 local UnitName = _G["UnitName"]
+local GetNumLootItems = _G["GetNumLootItems"]
+local GetLootSlotType = _G["GetLootSlotType"]
+local GetLootSlotLink = _G["GetLootSlotLink"]
+local GetLootSlotInfo = _G["GetLootSlotInfo"]
+local LOOT_SLOT_MONEY = _G["LOOT_SLOT_MONEY"]
 
 local function InstanceSignature(name, difficultyID)
     return string.format("%s:%s", tostring(name), tostring(difficultyID))
@@ -55,12 +60,16 @@ local function IsLikelyPersonalLoot(message, sender)
     local shortSender = tostring(sender or "")
     shortSender = shortSender:gsub("%-.*$", "")
 
-    if shortSender ~= "" and me ~= "" then
-        return shortSender == me
+    if shortSender ~= "" and me ~= "" and shortSender == me then
+        return true
     end
 
     local lower = string.lower(msg)
-    if string.find(lower, "^you receive") or string.find(lower, "you receive") then
+    if string.find(lower, "^you receive", 1, true)
+        or string.find(lower, "^you loot", 1, true)
+        or string.find(lower, "you receive", 1, true)
+        or string.find(lower, "you loot", 1, true)
+    then
         return true
     end
 
@@ -69,6 +78,17 @@ local function IsLikelyPersonalLoot(message, sender)
     end
 
     return false
+end
+
+local function IsLikelyPersonalMoney(message)
+    local lower = string.lower(tostring(message or ""))
+    if lower == "" then
+        return false
+    end
+
+    return string.find(lower, "^you loot", 1, true) ~= nil
+        or string.find(lower, "^you receive", 1, true) ~= nil
+        or string.find(lower, "^you gain", 1, true) ~= nil
 end
 
 local function MaybeCaptureLoot(self, message, sender)
@@ -94,16 +114,151 @@ local function MaybeCaptureLoot(self, message, sender)
     end
 end
 
+local function IsInLootContext(self)
+    return (self and self.activeRaidSession) or (self and self.activeLootRun and self.activeLootRun.run)
+end
+
+local function CaptureLootText(self, text, source)
+    local message = tostring(text or "")
+    if message == "" then
+        return
+    end
+
+    self.recentLootFingerprints = self.recentLootFingerprints or {}
+    local contextKey = "none"
+    if self.activeRaidSession and self.activeRaidSession.signature then
+        contextKey = "raid:" .. tostring(self.activeRaidSession.signature)
+    elseif self.activeLootRun and self.activeLootRun.run and self.activeLootRun.run.name then
+        contextKey = "run:" .. tostring(self.activeLootRun.run.name)
+    end
+
+    local stamp = Now()
+    local fingerprint = contextKey .. "|" .. message
+    local lastAt = self.recentLootFingerprints[fingerprint]
+    if lastAt and (stamp - lastAt) <= 2 then
+        return
+    end
+    self.recentLootFingerprints[fingerprint] = stamp
+
+    if self.activeRaidSession and DT.CharacterTracker and DT.CharacterTracker.AddRaidLoot then
+        DT.CharacterTracker:AddRaidLoot(self.activeRaidSession, message, source or "raid")
+        return
+    end
+
+    if self.activeLootRun and self.activeLootRun.run and DT.CharacterTracker and DT.CharacterTracker.AddLootToRun then
+        DT.CharacterTracker:AddLootToRun(self.activeLootRun.run, message)
+    end
+end
+
+local function CaptureLootFromSlots(self)
+    if not IsInLootContext(self) then
+        return
+    end
+
+    if not GetNumLootItems or not GetLootSlotType then
+        return
+    end
+
+    local numSlots = tonumber(GetNumLootItems()) or 0
+    if numSlots <= 0 then
+        return
+    end
+
+    for slot = 1, numSlots do
+        local slotType = GetLootSlotType(slot)
+        if slotType == LOOT_SLOT_MONEY then
+            local itemName, quantity
+            if GetLootSlotInfo then
+                local _, n, q = GetLootSlotInfo(slot)
+                itemName = n
+                quantity = q
+            end
+            local moneyText = tostring(itemName or "")
+            if moneyText == "" and tonumber(quantity) and tonumber(quantity) > 0 then
+                moneyText = string.format("You loot %dc", tonumber(quantity))
+            end
+            if moneyText ~= "" then
+                CaptureLootText(self, moneyText, "loot_api_money")
+            end
+        else
+            local link = GetLootSlotLink and GetLootSlotLink(slot)
+            local itemName, quantity
+            if GetLootSlotInfo then
+                local _, n, q = GetLootSlotInfo(slot)
+                itemName = n
+                quantity = q
+            end
+            local text = tostring(link or itemName or "")
+            local count = tonumber(quantity) or 1
+            if text ~= "" then
+                if count > 1 then
+                    text = string.format("%s x%d", text, count)
+                end
+                CaptureLootText(self, text, "loot_api_item")
+            end
+        end
+    end
+end
+
+local function IsTradeSystemMessage(message)
+    local text = string.lower(tostring(message or ""))
+    if text == "" then
+        return false
+    end
+    return string.find(text, "you traded", 1, true) ~= nil
+        or string.find(text, "you trade", 1, true) ~= nil
+end
+
+local function ExtractItemName(text)
+    local s = tostring(text or "")
+    local bracket = s:match("%[([^%]]+)%]")
+    if bracket and bracket ~= "" then
+        return bracket
+    end
+    return s
+end
+
+local function IsInstanceResetSystemMessage(message)
+    local text = string.lower(tostring(message or ""))
+    if text == "" then
+        return false
+    end
+
+    return string.find(text, "has been reset", 1, true) ~= nil
+        or string.find(text, "have been reset", 1, true) ~= nil
+end
+
 local function IsTrackedRaid(instanceType)
     if instanceType ~= "raid" then
         return false
     end
 
-    if not DT:IsGroupEnabled("raids_midnight_s1") then
-        return false
+    return DT.SourceCatalog and DT.SourceCatalog.IsGroupTrackable and DT.SourceCatalog:IsGroupTrackable("raids_midnight_s1")
+end
+
+function InstanceTracker:RefreshRaidSession()
+    local name, instanceType, difficultyID, difficultyName, _, _, _, mapID = GetInstanceInfo()
+    if instanceType == "raid" and name and IsTrackedRaid("raid") then
+        local sig = InstanceSignature(name, difficultyID)
+        local existing = self.activeRaidSession
+        if existing and existing.signature == sig then
+            existing.mapID = mapID or existing.mapID
+            existing.difficultyName = difficultyName or existing.difficultyName
+            return
+        end
+
+        self.activeRaidSession = {
+            signature = sig,
+            name = name,
+            difficultyID = difficultyID,
+            difficultyName = difficultyName,
+            mapID = mapID,
+            startedAt = Now(),
+        }
+        return
     end
 
-    return DT.SourceCatalog:IsGroupTrackable("raids_midnight_s1")
+    self.activeRaidSession = nil
 end
 
 local function RecordKnown(knownBucket, sig, name, difficultyName, difficultyID)
@@ -252,11 +407,17 @@ end
 function InstanceTracker:OnEvent(event, ...)
     if event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" then
         self:RequestSavedInstancesUpdate()
+        self:RefreshRaidSession()
+        return
+    end
+
+    if event == "ZONE_CHANGED" or event == "ZONE_CHANGED_INDOORS" or event == "ZONE_CHANGED_NEW_AREA" then
+        self:RefreshRaidSession()
         return
     end
 
     if event == "ENCOUNTER_END" then
-        local _, _, difficultyID, _, success = ...
+        local encounterID, encounterName, difficultyID, _, success = ...
         if success == 1 and difficultyID then
             self:RecordCurrentInstanceClear()
             local name, instanceType = GetInstanceInfo()
@@ -264,6 +425,14 @@ function InstanceTracker:OnEvent(event, ...)
                 BeginLootCapture(self, {
                     name = CanonicalDungeonName(name)
                 })
+            elseif instanceType == "raid" then
+                self:RefreshRaidSession()
+                if self.activeRaidSession and DT.CharacterTracker and DT.CharacterTracker.AddRaidBossKill then
+                    DT.CharacterTracker:AddRaidBossKill(self.activeRaidSession, {
+                        encounterID = encounterID,
+                        encounterName = encounterName,
+                    })
+                end
             else
                 BeginLootCapture(self, nil)
             end
@@ -280,7 +449,65 @@ function InstanceTracker:OnEvent(event, ...)
 
     if event == "CHAT_MSG_LOOT" then
         local lootMessage, sender = ...
+        if self.activeRaidSession then
+            if IsLikelyPersonalLoot(lootMessage, sender)
+                and not IsTradeSystemMessage(lootMessage)
+                and DT.CharacterTracker
+                and DT.CharacterTracker.AddRaidLoot
+            then
+                CaptureLootText(self, lootMessage, "raid_chat")
+            end
+            return
+        end
+
         MaybeCaptureLoot(self, lootMessage, sender)
+        return
+    end
+
+    if event == "CHAT_MSG_MONEY" then
+        local moneyMessage = ...
+        if not IsLikelyPersonalMoney(moneyMessage) then
+            return
+        end
+
+        if self.activeRaidSession and DT.CharacterTracker and DT.CharacterTracker.AddRaidLoot then
+            CaptureLootText(self, moneyMessage, "raid_money_chat")
+            return
+        end
+
+        MaybeCaptureLoot(self, moneyMessage, UnitName and UnitName("player") or nil)
+        return
+    end
+
+    if event == "LOOT_READY" or event == "LOOT_OPENED" then
+        self:RefreshRaidSession()
+        CaptureLootFromSlots(self)
+        return
+    end
+
+    if event == "CHAT_MSG_SYSTEM" then
+        local text = ...
+        local shouldClearLoot = DT and DT.db and DT.db.settings and DT.db.settings.clearLootOnInstanceReset == true
+        if shouldClearLoot and IsInstanceResetSystemMessage(text)
+            and DT.CharacterTracker
+            and DT.CharacterTracker.ClearRecordedLoot
+        then
+            DT.CharacterTracker:ClearRecordedLoot()
+            if DT.Print then
+                DT:Print("Recorded loot cleared due to instance reset.")
+            end
+            if DT.TrackerFrame and DT.TrackerFrame.Refresh then
+                DT.TrackerFrame:Refresh()
+            end
+        end
+
+        if self.activeRaidSession and IsTradeSystemMessage(text)
+            and DT.CharacterTracker
+            and DT.CharacterTracker.RemoveRaidLootByText
+        then
+            local itemText = ExtractItemName(text)
+            DT.CharacterTracker:RemoveRaidLootByText(self.activeRaidSession, itemText)
+        end
         return
     end
 
