@@ -64,11 +64,12 @@ local COLORS = {
 }
 
 local SETTINGS_ABOUT = {
-    name = "DoxyTracker",
+    name = "Doxy's Vault & Venture",
     author = "Doxy",
     version = "0.0.1",
     lastUpdated = "2026-03-14",
-    notes = "Tracks dungeon and raid progress, boss kills, and loot with per-difficulty summaries.",
+    notes =
+    "Initial release of add-on. Tracks daily and weekly quests, dungeon and raid progress, and more. Feedback and suggestions welcome! This is still a work in progress, so expect some rough edges. Thanks for trying it out!",
 }
 
 local state = {
@@ -140,9 +141,9 @@ end
 
 local function GetRaidFilterOptions()
     return (DT.SourceCatalog and DT.SourceCatalog.GetRaidExpansionOptions and DT.SourceCatalog:GetRaidExpansionOptions()) or
-    {
-        { key = "all", label = "All Expansions" },
-    }
+        {
+            { key = "all", label = "All Expansions" },
+        }
 end
 
 local function EnsureExpansionFilterValid()
@@ -348,26 +349,18 @@ local function BuildDungeonModel(char)
             dungeonName = DT.SourceCatalog:GetCanonicalDungeonName(dungeonName)
         end
 
-        local expansionKey = nil
-        if DT.SourceCatalog and DT.SourceCatalog.GetDungeonExpansionInfo then
-            expansionKey = DT.SourceCatalog:GetDungeonExpansionInfo(dungeonName)
-        end
-
-        local expansionMatch = (state.dungeonExpansionFilter == "all" or state.dungeonExpansionFilter == expansionKey)
-        local isVisible = true
-        if DT.SourceCatalog and DT.SourceCatalog.IsDungeonVisible then
-            isVisible = DT.SourceCatalog:IsDungeonVisible(dungeonName)
-        end
-
-        if expansionMatch and isVisible then
-            local row = model.byName[dungeonName]
-            if row then
-                local slot = DifficultySlot(type(entry) == "table" and entry.difficultyID,
-                    type(entry) == "table" and entry.difficultyName)
-                if slot and IsDungeonDifficultySlot(slot) then
-                    row.done[slot] = true
-                    row.known[slot] = true
-                end
+        -- Use the row created by the first loop as the authority on filter membership.
+        -- This avoids a mismatch where GetDungeonExpansionInfo returns a hardcoded
+        -- group expansion key (e.g. "midnight_s1") that differs from the Journal-derived
+        -- key used by GetAllDungeonEntries (e.g. "midnight"), causing clears to be
+        -- silently dropped when the two keys don't match the active filter.
+        local row = model.byName[dungeonName]
+        if row then
+            local slot = DifficultySlot(type(entry) == "table" and entry.difficultyID,
+                type(entry) == "table" and entry.difficultyName)
+            if slot and IsDungeonDifficultySlot(slot) then
+                row.done[slot] = true
+                row.known[slot] = true
             end
         end
     end
@@ -478,7 +471,7 @@ local function BuildRaidModel(char)
     for _, entry in pairs(clears) do
         if type(entry) == "table" and entry.name then
             local expansionKey = (DT.SourceCatalog and DT.SourceCatalog.GetRaidExpansionInfo and select(1, DT.SourceCatalog:GetRaidExpansionInfo(entry.name))) or
-            nil
+                nil
             if includeExpansion(expansionKey) then
                 local slot = RaidDifficultySlot(entry.difficultyID, entry.difficultyName)
                 if slot then
@@ -501,7 +494,7 @@ local function BuildRaidModel(char)
     for key, kills in pairs(bossStore) do
         local raidName, diff = splitRaidKey(key)
         local expansionKey = (DT.SourceCatalog and DT.SourceCatalog.GetRaidExpansionInfo and raidName and select(1, DT.SourceCatalog:GetRaidExpansionInfo(raidName))) or
-        nil
+            nil
         if raidName and type(kills) == "table" and includeExpansion(expansionKey) then
             local row = ensure(raidName)
             row.bossKills = row.bossKills + #kills
@@ -512,7 +505,7 @@ local function BuildRaidModel(char)
         local raidName, diff = splitRaidKey(key)
         local slot = RaidDifficultySlot(diff)
         local expansionKey = (DT.SourceCatalog and DT.SourceCatalog.GetRaidExpansionInfo and raidName and select(1, DT.SourceCatalog:GetRaidExpansionInfo(raidName))) or
-        nil
+            nil
         if raidName and slot and type(loot) == "table" and includeExpansion(expansionKey) then
             local row = ensure(raidName)
             local bucket = row.lootBySlot[slot]
@@ -1260,7 +1253,7 @@ local function SetQuestPin(questID, mapID)
     end
 
     local inLog = C_QuestLog and C_QuestLog.GetLogIndexForQuestID and
-    (C_QuestLog.GetLogIndexForQuestID(questID) or 0) > 0
+        (C_QuestLog.GetLogIndexForQuestID(questID) or 0) > 0
 
     if inLog and C_SuperTrack and C_SuperTrack.SetSuperTrackedQuestID then
         C_SuperTrack.SetSuperTrackedQuestID(questID)
@@ -2075,6 +2068,11 @@ local function BuildSettingsCheckboxItems()
             label = "Clear loot on instance reset",
             note = "If enabled, reset-instance clears loot logs only for runs with no boss kills.",
         },
+        {
+            key = "showMapButton",
+            label = "Show world map button",
+            note = "Displays a quick-open button on the world map.",
+        },
     }
 end
 
@@ -2144,6 +2142,9 @@ local function RenderSettingsView()
             if item.key == "allowPossibleSources" or item.key == "hidePossibleSources" then
                 state.dungeonCacheDirty = true
                 state.raidCacheDirty = true
+            end
+            if item.key == "showMapButton" and DT.MapButton and DT.MapButton.ApplyVisibility then
+                DT.MapButton:ApplyVisibility()
             end
             ScheduleRebuild(true)
         end)
@@ -2487,7 +2488,7 @@ local function Build()
 
             local options = (state.activeTab == "raids") and GetRaidFilterOptions() or GetExpansionFilterOptions()
             local selectedValue = (state.activeTab == "raids") and state.raidExpansionFilter or
-            state.dungeonExpansionFilter
+                state.dungeonExpansionFilter
             for _, option in ipairs(options) do
                 local info = UIDropDownMenu_CreateInfo()
                 info.text = option.label

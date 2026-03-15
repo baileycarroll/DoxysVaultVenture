@@ -10,6 +10,7 @@ DT.Config.defaults = {
         hidePossibleSources = true,
         raidAutoEnableDate = "2026-03-17",
         clearLootOnInstanceReset = false,
+        showMapButton = true,
         dungeonVisibility = {
             expansions = {},
             dungeons = {},

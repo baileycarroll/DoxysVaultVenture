@@ -35,6 +35,12 @@ local DUNGEON_GROUPS                       = {
     "dungeons_midnight_bonus",
 }
 
+-- Dungeons that exist in multiple expansions: force their expansion key so
+-- the UI filter always shows them under the correct expansion.
+local DUNGEON_EXPANSION_OVERRIDES = {
+    ["Magisters' Terrace"] = { key = "midnight", label = "Midnight" },
+}
+
 local function NormalizeText(value)
     local text = tostring(value or "")
     text = string.lower(text)
@@ -129,7 +135,6 @@ DT.SourceCatalog.dungeonNameAliases = {
     [NormalizeText("Magisters' Terrace")] = "Magisters' Terrace",
     [NormalizeText("Magister's Terrace")] = "Magisters' Terrace",
     [NormalizeText("Maisara Caverns")] = "Maisara Caverns",
-    [NormalizeText("Miasara Caverns")] = "Maisara Caverns",
     [NormalizeText("Nexus-Point Xenas")] = "Nexus-Point Xenas",
     [NormalizeText("Windrunner Spire")] = "Windrunner Spire",
     [NormalizeText("Algeth'ar Academy")] = "Algeth'ar Academy",
@@ -225,6 +230,9 @@ DT.SourceCatalog.groups = {
             [DIFFICULTY_MYTHIC] = true,
         },
         knownInstances = {
+            ["Magisters' Terrace:1"]  = { name = "Magisters' Terrace", difficultyName = "Normal", difficultyID = 1 },
+            ["Magisters' Terrace:2"]  = { name = "Magisters' Terrace", difficultyName = "Heroic", difficultyID = 2 },
+            ["Magisters' Terrace:23"] = { name = "Magisters' Terrace", difficultyName = "Mythic", difficultyID = 23 },
             ["Den of Nalorakk:1"]    = { name = "Den of Nalorakk", difficultyName = "Normal", difficultyID = 1 },
             ["Den of Nalorakk:2"]    = { name = "Den of Nalorakk", difficultyName = "Heroic", difficultyID = 2 },
             ["Den of Nalorakk:23"]   = { name = "Den of Nalorakk", difficultyName = "Mythic", difficultyID = 23 },
@@ -397,6 +405,13 @@ function DT.SourceCatalog:GetAllDungeonEntries()
 
     local dbEntries = DT.db and DT.db.catalog and DT.db.catalog.dungeonEntries
     if type(dbEntries) == "table" and #dbEntries > 0 then
+        for _, entry in ipairs(dbEntries) do
+            local override = DUNGEON_EXPANSION_OVERRIDES[entry.name]
+            if override then
+                entry.expansionKey = override.key
+                entry.expansionLabel = override.label
+            end
+        end
         return dbEntries
     end
 
@@ -492,6 +507,11 @@ function DT.SourceCatalog:RefreshDungeonCatalogFromJournal(force)
                 difficulties = {},
             }
             byName[canonical] = row
+        else
+            -- Update to the latest tier's expansion so dungeons reworked in a newer
+            -- expansion (e.g. Magisters' Terrace in Midnight) get the correct key.
+            row.expansionKey = expansionKey
+            row.expansionLabel = expansionLabel
         end
         return row
     end

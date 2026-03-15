@@ -12,4 +12,5 @@ tracking/character_tracker.lua
 trackers/quests.lua
 trackers/instances.lua
 ui/tracker_frame_ej.lua
+ui/map_button.lua
 ui/commands.lua
